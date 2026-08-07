@@ -210,6 +210,7 @@
       document.getElementById('endgame-message').innerHTML = '';
 
       render();
+      checkGameOver();
     }
 
     function getLandlockedSet(allowCorners = true) {
@@ -367,14 +368,16 @@
       backlash += 5;
       cell.bought = true;
       purchasesThisTurn++;
-      
+
       // Reprice land after every purchase
       repriceLand();
-      
+      render();
+
+      // Check immediately in case no affordable land remains, even mid-turn
+      if (checkGameOver()) return;
+
       if (purchasesThisTurn >= 2) {
         endTurn();
-      } else {
-        render();
       }
     }
 
@@ -394,30 +397,36 @@
       purchasesThisTurn = 0;
 
       render();
+      checkGameOver();
+    }
+
+    function checkGameOver() {
+      if (gameOver) return true;
 
       const availableToBuy = board.some(cell => cell.type === 'public' && !cell.bought && money >= cell.cost);
+      if (backlash < 100 && availableToBuy) return false;
 
-      if (backlash >= 100 || !availableToBuy) {
-        gameOver = true;
-        const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
-        const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
-        const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
-        const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
-        const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
-        const additionalCost = (valueIllegal - valueLegal).toLocaleString();
-        const cornerCrossingLegalized = backlash >= 100;
-        const reason = cornerCrossingLegalized ? 'Public outcry forces corner crossing legalization!' : 'You have run out of money.';
+      gameOver = true;
+      const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
+      const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
+      const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
+      const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
+      const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
+      const additionalCost = (valueIllegal - valueLegal).toLocaleString();
+      const cornerCrossingLegalized = backlash >= 100;
+      const reason = cornerCrossingLegalized ? 'Public outcry forces corner crossing legalization!' : 'You can no longer afford any public land.';
 
-        const resultLine = cornerCrossingLegalized
-          ? `<p>Return on Investment: ${roiLegal}x</p>`
-          : `<p>Return on Investment: ${roiIllegal}x</p>` +
-            `<p>Additional cost to secure the same number of public parcels if corner crossing were legal: ${additionalCost}</p>`;
+      const resultLine = cornerCrossingLegalized
+        ? `<p>Return on Investment: ${roiLegal}x</p>`
+        : `<p>Return on Investment: ${roiIllegal}x</p>` +
+          `<p>Additional cost to secure the same number of public parcels if corner crossing were legal: ${additionalCost}</p>`;
 
-        document.getElementById('endgame-message').innerHTML =
-          `<p>Game over. ${reason}</p>` +
-          resultLine +
-          `<button onclick="location.reload()">Start New Game</button>`;
-      }
+      document.getElementById('endgame-message').innerHTML =
+        `<p>Game over. ${reason}</p>` +
+        resultLine +
+        `<button onclick="location.reload()">Start New Game</button>`;
+
+      return true;
     }
 
     window.addEventListener('resize', () => {
