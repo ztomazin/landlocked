@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Landlocked - Public Land Access Game</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 1rem;
+    }
+    h1 {
+      text-align: center;
+    }
+    #game-board {
+      display: grid;
+      grid-template-columns: repeat(10, 40px);
+      gap: 2px;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .cell {
+      width: 40px;
+      height: 40px;
+      text-align: center;
+      line-height: 40px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .public { background-color: #7fc97f; }
+    .private { background-color: #beaed4; }
+    .critical { background-color: #fdc086; }
+    #controls, #status {
+      text-align: center;
+      margin-top: 1rem;
+    }
+    button {
+      margin: 0.2rem;
+      padding: 0.5rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Landlocked</h1>
+  <div id="status"></div>
+  <div id="game-board"></div>
+  <div id="controls">
+    <button onclick="endTurn()">End Turn</button>
+  </div>
+
+  <script>
+    const size = 10;
+    let money = 1000000;
+    let backlash = 0;
+    let turn = 1;
+    const board = [];
+
+    // Generate board with public, private, and critical cells
+    for (let i = 0; i < size * size; i++) {
+      const rand = Math.random();
+      let type = 'public';
+      if (rand < 0.15) type = 'private';
+      else if (rand > 0.85) type = 'critical';
+      board.push({ type, bought: false });
+    }
+
+    function render() {
+      const boardDiv = document.getElementById('game-board');
+      boardDiv.innerHTML = '';
+      board.forEach((cell, i) => {
+        const div = document.createElement('div');
+        div.className = `cell ${cell.type}`;
+        if (cell.bought) div.style.border = '2px solid black';
+        div.innerText = i;
+        div.onclick = () => buyCell(i);
+        boardDiv.appendChild(div);
+      });
+
+      document.getElementById('status').innerText = `Turn: ${turn} | Money: $${money.toLocaleString()} | Backlash: ${backlash}%`;
+    }
+
+    function buyCell(i) {
+      const cell = board[i];
+      if (cell.type === 'private' || cell.bought) return alert('Cannot buy this cell.');
+      const cost = cell.type === 'critical' ? 200000 : 100000;
+      if (money < cost) return alert('Not enough money.');
+      money -= cost;
+      backlash += cell.type === 'critical' ? 10 : 5;
+      cell.bought = true;
+      cell.type = 'private';
+      render();
+    }
+
+    function endTurn() {
+      backlash += 1;
+      turn++;
+      if (backlash >= 100) {
+        alert('Public outcry forces corner crossing legalization! Game over.');
+        location.reload();
+      }
+      if (turn > 30) {
+        alert(`Game over. You lasted 30 years and locked out ${board.filter(c => c.bought).length} parcels.`);
+        location.reload();
+      }
+      render();
+    }
+
+    render();
+  </script>
+</body>
+</html>

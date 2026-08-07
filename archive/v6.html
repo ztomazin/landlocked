@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Landlocked - Public Land Access Game</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #e1e8e4;
+      margin: 0;
+      padding: 1rem;
+    }
+    h1 {
+      text-align: center;
+    }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 2rem;
+      margin-bottom: 1rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .legend-color {
+      width: 20px;
+      height: 20px;
+      display: inline-block;
+      border: 1px solid #333;
+    }
+    #game-board {
+      display: grid;
+      grid-template-columns: repeat(20, 20px);
+      gap: 1px;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .cell {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+      border-radius: 2px;
+    }
+    .public { background-color: #7fc97f; }
+    .private-initial { background-color: #beaed4; }
+    .private-player { background-color: #9370DB; }
+    .critical { background-color: #fdc086; }
+    .heat { box-shadow: 0 0 5px 2px red; }
+    .bought { border: 1px solid black; }
+    .landlocked { outline: 2px solid black; outline-offset: -2px; }
+
+    #controls, #status {
+      text-align: center;
+      margin-top: 1rem;
+    }
+    button {
+      margin: 0.2rem;
+      padding: 0.5rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Landlocked</h1>
+
+  <div id="legend">
+    <div class="legend-item"><span class="legend-color public"></span> Public Land ($50K–$100K)</div>
+    <div class="legend-item"><span class="legend-color private-initial"></span> Existing Private Land</div>
+    <div class="legend-item"><span class="legend-color private-player"></span> Your Purchased Land</div>
+    <div class="legend-item"><span class="legend-color critical"></span> Critical Access ($250K)</div>
+    <div class="legend-item"><span class="legend-color" style="box-shadow: 0 0 5px 2px red;"></span> High-Impact Parcel</div>
+    <div class="legend-item"><span class="legend-color" style="outline: 2px solid black;"></span> Landlocked Public</div>
+  </div>
+
+  <div id="controls">
+    <label><input type="checkbox" id="cornerToggle" checked> Corner Crossing Legal</label>
+  </div>
+
+  <div id="status"></div>
+  <div id="game-board"></div>
+
+  <script>
+    const size = 20;
+    let money = 1000000;
+    let backlash = 0;
+    let turn = 1;
+    const board = [];
+
+    for (let i = 0; i < size * size; i++) {
+      const rand = Math.random();
+      let type = 'public';
+      if (rand < 0.1) type = 'private-initial';
+      else if (rand > 0.92) type = 'critical';
+
+      let cost = 100000;
+      if (type === 'critical') cost = 250000;
+      else cost = Math.random() < 0.5 ? 50000 : 100000;
+
+      let impact = Math.random() > 0.95;
+
+      board.push({ type, bought: false, cost, impact, landlocked: false });
+    }
+
+    function render() {
+      const lockedSet = getLandlockedSet();
+      const boardDiv = document.getElementById('game-board');
+      boardDiv.innerHTML = '';
+      board.forEach((cell, i) => {
+        const div = document.createElement('div');
+        let cellType = cell.type;
+        if (cell.bought) cellType = 'private-player';
+
+        const locked = lockedSet.has(i);
+        if (cell.type === 'public') cell.landlocked = locked;
+
+        div.className = `cell ${cellType} ${cell.bought ? 'bought' : ''} ${cell.impact ? 'heat' : ''} ${locked ? 'landlocked' : ''}`;
+        div.title = `Parcel ${i}\nType: ${cellType}\nCost: $${cell.cost.toLocaleString()}`;
+        div.onclick = () => buyCell(i);
+        boardDiv.appendChild(div);
+      });
+
+      const playerOwned = board.filter(c => c.bought).length;
+      const totalPrivate = board.filter(c => c.type === 'private-initial' || c.bought).length;
+      const lockedParcels = [...lockedSet].length;
+
+      document.getElementById('status').innerText =
+        `Turn: ${turn} | Money: $${money.toLocaleString()} | Backlash: ${backlash}%\n` +
+        `Player Parcels: ${playerOwned} | Total Private Parcels: ${totalPrivate} | Controlled (Landlocked) Public Parcels: ${lockedParcels}`;
+    }
+
+    function buyCell(i) {
+      const cell = board[i];
+      if (cell.type !== 'public' && cell.type !== 'critical') return alert('Cannot buy this cell.');
+
+      if (money < cell.cost) return alert('Not enough money.');
+      money -= cell.cost;
+      backlash += cell.type === 'critical' ? 10 : 5;
+      cell.bought = true;
+      endTurn();
+    }
+
+    function endTurn() {
+      backlash += 1;
+      turn++;
+      if (backlash >= 100) {
+        alert('Public outcry forces corner crossing legalization! Game over.');
+        location.reload();
+      }
+      if (turn > 30) {
+        alert(`Game over. You lasted 30 years and locked out ${board.filter(c => c.bought).length} parcels.`);
+        location.reload();
+      }
+      render();
+    }
+
+    function getLandlockedSet() {
+      const visited = new Set();
+      const queue = [];
+      const allowCorners = document.getElementById('cornerToggle').checked;
+      const directions = allowCorners
+        ? [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]]
+        : [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const edge = x === 0 || x === size - 1 || y === 0 || y === size - 1;
+          const idx = y * size + x;
+          if (edge && board[idx].type === 'public') {
+            visited.add(idx);
+            queue.push([x, y]);
+          }
+        }
+      }
+
+      while (queue.length) {
+        const [x, y] = queue.shift();
+
+        for (const [dx, dy] of directions) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < size && ny >= 0 && ny < size) {
+            const ni = ny * size + nx;
+            const neighbor = board[ni];
+            if (!visited.has(ni) && neighbor.type === 'public') {
+              visited.add(ni);
+              queue.push([nx, ny]);
+            }
+          }
+        }
+      }
+
+      const locked = new Set();
+      board.forEach((cell, idx) => {
+        if (cell.type === 'public' && !visited.has(idx)) {
+          locked.add(idx);
+        }
+      });
+      return locked;
+    }
+
+    render();
+  </script>
+</body>
+</html>

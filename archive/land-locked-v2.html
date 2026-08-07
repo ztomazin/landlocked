@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Landlocked - Public Land Access Game</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #e1e8e4;
+      margin: 0;
+      padding: 1rem;
+    }
+    h1 {
+      text-align: center;
+    }
+    #legend {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      margin-bottom: 1rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .legend-color {
+      width: 20px;
+      height: 20px;
+      display: inline-block;
+      border: 1px solid #333;
+    }
+    #game-board {
+      display: grid;
+      grid-template-columns: repeat(100, 8px);
+      gap: 1px;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .cell {
+      width: 8px;
+      height: 8px;
+      cursor: pointer;
+      border-radius: 1px;
+    }
+    .public { background-color: #7fc97f; } /* Green */
+    .private { background-color: #beaed4; } /* Purple */
+    .critical { background-color: #fdc086; } /* Orange */
+    .bought { border: 1px solid black; }
+
+    #controls, #status {
+      text-align: center;
+      margin-top: 1rem;
+    }
+    button {
+      margin: 0.2rem;
+      padding: 0.5rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Landlocked</h1>
+
+  <div id="legend">
+    <div class="legend-item"><span class="legend-color public"></span> Public Land</div>
+    <div class="legend-item"><span class="legend-color private"></span> Private Land</div>
+    <div class="legend-item"><span class="legend-color critical"></span> Critical Access</div>
+  </div>
+
+  <div id="status"></div>
+  <div id="game-board"></div>
+  <div id="controls">
+    <button onclick="endTurn()">End Turn</button>
+  </div>
+
+  <script>
+    const size = 100;
+    let money = 1000000;
+    let backlash = 0;
+    let turn = 1;
+    const board = [];
+
+    for (let i = 0; i < size * size; i++) {
+      const rand = Math.random();
+      let type = 'public';
+      if (rand < 0.1) type = 'private';
+      else if (rand > 0.92) type = 'critical';
+      board.push({ type, bought: false });
+    }
+
+    function render() {
+      const boardDiv = document.getElementById('game-board');
+      boardDiv.innerHTML = '';
+      board.forEach((cell, i) => {
+        const div = document.createElement('div');
+        div.className = `cell ${cell.type} ${cell.bought ? 'bought' : ''}`;
+        div.title = `Parcel ${i}\nType: ${cell.type}`;
+        div.onclick = () => buyCell(i);
+        boardDiv.appendChild(div);
+      });
+      document.getElementById('status').innerText = `Turn: ${turn} | Money: $${money.toLocaleString()} | Backlash: ${backlash}%`;
+    }
+
+    function buyCell(i) {
+      const cell = board[i];
+      if (cell.type === 'private' || cell.bought) return alert('Cannot buy this cell.');
+      const cost = cell.type === 'critical' ? 200000 : 100000;
+      if (money < cost) return alert('Not enough money.');
+      money -= cost;
+      backlash += cell.type === 'critical' ? 10 : 5;
+      cell.bought = true;
+      cell.type = 'private';
+      render();
+    }
+
+    function endTurn() {
+      backlash += 1;
+      turn++;
+      if (backlash >= 100) {
+        alert('Public outcry forces corner crossing legalization! Game over.');
+        location.reload();
+      }
+      if (turn > 30) {
+        alert(`Game over. You lasted 30 years and locked out ${board.filter(c => c.bought).length} parcels.`);
+        location.reload();
+      }
+      render();
+    }
+
+    render();
+  </script>
+</body>
+</html>

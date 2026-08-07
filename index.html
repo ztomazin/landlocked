@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Landlocked - Public Land Access Game</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #e1e8e4;
+      margin: 0;
+      padding: 1rem;
+    }
+    h1 {
+      text-align: center;
+    }
+    #description {
+      max-width: 800px;
+      margin: 0 auto 2rem auto;
+      text-align: center;
+      padding: 0 1rem;
+      line-height: 1.5;
+      color: #333;
+    }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 2rem;
+      margin-bottom: 1rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .legend-color {
+      width: 20px;
+      height: 20px;
+      display: inline-block;
+      border: 1px solid #333;
+    }
+    #summary {
+      text-align: center;
+      font-weight: bold;
+      margin-bottom: 1rem;
+    }
+    #game-board {
+      display: grid;
+      grid-template-columns: repeat(20, 20px);
+      gap: 1px;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .cell {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+      border-radius: 2px;
+    }
+    .public-1 { background-color: #e8f5e8; }
+    .public-2 { background-color: #c8e6c8; }
+    .public-3 { background-color: #a8d6a8; }
+    .public-4 { background-color: #88c688; }
+    .public-5 { background-color: #7fc97f; }
+    .private-initial { background-color: #beaed4; }
+    .private-player { background-color: #9370DB; }
+    .bought { border: 1px solid black; }
+    .landlocked { outline: 2px solid black; outline-offset: -2px; }
+
+    #controls, #status {
+      text-align: center;
+      margin-top: 1rem;
+    }
+    button {
+      margin: 0.2rem;
+      padding: 0.5rem 1rem;
+    }
+    #endgame-message {
+      text-align: center;
+      margin-top: 2rem;
+      font-size: 1.2em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Landlocked</h1>
+  
+  <div id="description">
+    <p>Be a wealthy billionaire looking to maximize your investment by strategically buying land that prevents the public from accessing public land! There are existing private land purchases that will help you get started. Collaborate with the super wealthy to win! In this scenario, <a href="https://montanafreepress.org/2025/05/22/landowner-looks-to-appeal-loss-in-corner-crossing-case-to-us-supreme-court/" target="_blank" style="color: #2d7a2d; text-decoration: underline;">corner-crossing</a> is illegal. <br>
+      Rules <br>
+      1. All purple land is counted as private. The goal is to encircle public land with private land. It is considered landlocked if the individual or a group of public land cannot be accessed by other public land.<br>
+      2. Click on public land to buy it - the darker the green, the more expensive.<br>
+      3. You can buy two pieces of land per turn or lobby, which is pay money to reduce public backlash. Backlash increases as more public land is made landlocked.<br>
+      4. Game is over after 15 turns, you cannot buy more land, or backlash hits 100%.<br>
+      5. When backlash hits 100%, public outcry causes legislation to make corner-crossing legal!<br>
+      6. When the game is over, your return on investment (ROI) will be calculated.  Additionally, how much it would cost to secure the same amount of public land with corner crossing being legal will be displayed. <br>
+
+    </p>
+  </div>
+
+  <div id="legend">
+    <div class="legend-item">
+      <div style="display: flex; align-items: center; gap: 0.25rem;">
+        <span class="legend-color public-1"></span>
+        <span class="legend-color public-2"></span>
+        <span class="legend-color public-3"></span>
+        <span class="legend-color public-4"></span>
+        <span class="legend-color public-5"></span>
+      </div>
+      Public Land ($50K–$250K)
+    </div>
+    <div class="legend-item"><span class="legend-color private-initial"></span> Existing Private Land</div>
+    <div class="legend-item"><span class="legend-color private-player"></span> Your Purchased Land</div>
+    <div class="legend-item"><span class="legend-color" style="outline: 2px solid black;"></span> Landlocked Public</div>
+  </div>
+
+  <div id="summary"></div>
+  <div id="status"></div>
+  <div id="lobbying-controls" style="text-align: center; margin-bottom: 1rem;">
+    <label for="lobbying-amount">Lobbying Amount: $</label>
+    <input type="number" id="lobbying-amount" min="50000" max="500000" step="50000" value="50000" style="width: 100px;">
+    <button onclick="lobby()" id="lobby-button">Lobby (Costs Full Turn)</button>
+  </div>
+  <div id="game-board"></div>
+  <div id="endgame-message"></div>
+
+  <script>
+    const size = 20;
+    let money = 2000000;
+    let backlash = 0;
+    let turn = 1;
+    let purchasesThisTurn = 0;
+    let gameOver = false;
+    const board = [];
+
+    // Initialize board
+    for (let i = 0; i < size * size; i++) {
+      const rand = Math.random();
+      let type = 'public';
+      let tier = 1;
+      let cost = 50000;
+      
+      if (rand < 0.1) {
+        type = 'private-initial';
+        cost = 0;
+      } else {
+        const tierRand = Math.random();
+        if (tierRand < 0.3) { tier = 1; cost = 50000; }
+        else if (tierRand < 0.5) { tier = 2; cost = 100000; }
+        else if (tierRand < 0.7) { tier = 3; cost = 150000; }
+        else if (tierRand < 0.9) { tier = 4; cost = 200000; }
+        else { tier = 5; cost = 250000; }
+      }
+
+      board.push({ type, tier, bought: false, cost, landlocked: false });
+    }
+
+    function getLandlockedSet(allowCorners = true) {
+      const visited = new Set();
+      const queue = [];
+      const directions = allowCorners
+        ? [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]]
+        : [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+      // Start from edges
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const edge = x === 0 || x === size - 1 || y === 0 || y === size - 1;
+          const idx = y * size + x;
+          const cell = board[idx];
+          if (edge && cell.type === 'public' && !cell.bought) {
+            visited.add(idx);
+            queue.push([x, y]);
+          }
+        }
+      }
+
+      // Flood fill
+      while (queue.length) {
+        const [x, y] = queue.shift();
+
+        for (const [dx, dy] of directions) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < size && ny >= 0 && ny < size) {
+            const ni = ny * size + nx;
+            const neighbor = board[ni];
+            if (!visited.has(ni) && neighbor.type === 'public' && !neighbor.bought) {
+              visited.add(ni);
+              queue.push([nx, ny]);
+            }
+          }
+        }
+      }
+
+      // Find landlocked parcels
+      const locked = new Set();
+      board.forEach((cell, idx) => {
+        if (cell.type === 'public' && !cell.bought && !visited.has(idx)) {
+          locked.add(idx);
+        }
+      });
+      return locked;
+    }
+
+    function lobby() {
+      if (gameOver) return;
+      
+      const lobbyingAmount = parseInt(document.getElementById('lobbying-amount').value);
+      
+      if (isNaN(lobbyingAmount) || lobbyingAmount < 1000) {
+        alert('Lobbying amount must be at least $1,000.');
+        return;
+      }
+      
+      if (money < lobbyingAmount) {
+        alert('Not enough money for lobbying effort.');
+        return;
+      }
+      
+      if (purchasesThisTurn > 0) {
+        alert('You have already made purchases this turn. Lobbying costs a full turn.');
+        return;
+      }
+      
+      // Calculate backlash reduction: X/10000 where X is the dollar amount
+      const backlashReduction = lobbyingAmount / 10000;
+      
+      money -= lobbyingAmount;
+      backlash = Math.max(0, backlash - backlashReduction);
+      
+      alert(`Lobbying successful! Spent ${lobbyingAmount.toLocaleString()} and reduced backlash by ${backlashReduction.toFixed(1)}%.`);
+      
+      // End the turn since lobbying costs a full turn
+      endTurn();
+    }
+
+    function render() {
+      const lockedSet = getLandlockedSet(true);
+      const boardDiv = document.getElementById('game-board');
+      boardDiv.innerHTML = '';
+      
+      board.forEach((cell, i) => {
+        const div = document.createElement('div');
+        let cellClass = cell.type;
+        if (cell.bought) {
+          cellClass = 'private-player';
+        } else if (cell.type === 'public') {
+          cellClass = `public-${cell.tier}`;
+        }
+
+        const locked = lockedSet.has(i);
+        if (cell.type === 'public' && !cell.bought) cell.landlocked = locked;
+
+        div.className = `cell ${cellClass} ${cell.bought ? 'bought' : ''} ${locked ? 'landlocked' : ''}`;
+        div.title = `Parcel ${i}\nType: ${cell.type === 'public' ? `Public Tier ${cell.tier}` : cell.type}\nCost: $${cell.cost.toLocaleString()}`;
+        
+        if (!cell.bought && cell.type === 'public') {
+          div.onclick = () => buyCell(i);
+        }
+        
+        boardDiv.appendChild(div);
+      });
+
+      // Calculate stats
+      const lockedParcelsLegal = getLandlockedSet(true).size;
+      const lockedParcelsIllegal = getLandlockedSet(false).size;
+      const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
+      const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
+      const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
+      const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
+      const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
+
+      document.getElementById('summary').innerText =
+        `Controlled (Landlocked) Public Parcels if Corner Crossing Legal: ${lockedParcelsLegal} | ROI: ${roiLegal}x | ` +
+        `Controlled (Landlocked) Public Parcels if Corner Crossing Illegal: ${lockedParcelsIllegal} | ROI: ${roiIllegal}x`;
+
+      const playerOwned = board.filter(c => c.bought).length;
+      const totalPrivate = board.filter(c => c.type === 'private-initial' || c.bought).length;
+
+      document.getElementById('status').innerText =
+        `Turn: ${turn} | Money: ${money.toLocaleString()} | Backlash: ${backlash}% | Purchases this turn: ${purchasesThisTurn}/2\n` +
+        `Player Parcels: ${playerOwned} | Total Private Parcels: ${totalPrivate}`;
+    }
+
+    function buyCell(i) {
+      if (gameOver) return;
+      const cell = board[i];
+      if (cell.type !== 'public') {
+        alert('Cannot buy this cell.');
+        return;
+      }
+      if (cell.bought) {
+        alert('Already purchased.');
+        return;
+      }
+      if (money < cell.cost) {
+        alert('Not enough money.');
+        return;
+      }
+      if (purchasesThisTurn >= 2) {
+        alert('You can only make 2 purchases per turn. Click to advance to next turn.');
+        return;
+      }
+
+      money -= cell.cost;
+      backlash += 5;
+      cell.bought = true;
+      purchasesThisTurn++;
+      
+      // Reprice land after every purchase
+      repriceLand();
+      
+      if (purchasesThisTurn >= 2) {
+        endTurn();
+      } else {
+        render();
+      }
+    }
+
+    function repriceLand() {
+      const lockedSet = getLandlockedSet(true);
+      board.forEach((cell, i) => {
+        if (cell.type === 'public' && !cell.bought) {
+          const appreciationRate = lockedSet.has(i) ? 0.10 : 0.02;
+          cell.cost = Math.round(cell.cost * (1 + appreciationRate));
+        }
+      });
+    }
+
+    function endTurn() {
+      backlash += 1;
+      turn++;
+      purchasesThisTurn = 0;
+
+      render();
+
+      const availableToBuy = board.some(cell => cell.type === 'public' && !cell.bought && money >= cell.cost);
+
+      if (backlash >= 100 || !availableToBuy) {
+        gameOver = true;
+        const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
+        const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
+        const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
+        const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
+        const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
+        const additionalCost = (valueIllegal - valueLegal).toLocaleString();
+        const reason = backlash >= 100 ? 'Public outcry forces corner crossing legalization!' : 'You have run out of money.';
+
+        document.getElementById('endgame-message').innerHTML =
+          `<p>Game over. ${reason}</p>` +
+          `<p>Return on Investment if Corner Crossing Legal: ${roiLegal}x</p>` +
+          `<p>Return on Investment if Corner Crossing Illegal: ${roiIllegal}x</p>` +
+          `<p>Additional cost to secure the same number of public parcels if corner crossing were legal: ${additionalCost}</p>` +
+          `<button onclick="location.reload()">Start New Game</button>`;
+      }
+    }
+
+    // Start the game
+    render();
+  </script>
+</body>
+</html>
