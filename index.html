@@ -99,61 +99,89 @@
     </p>
   </div>
 
-  <div id="legend">
-    <div class="legend-item">
-      <div style="display: flex; align-items: center; gap: 0.25rem;">
-        <span class="legend-color public-1"></span>
-        <span class="legend-color public-2"></span>
-        <span class="legend-color public-3"></span>
-        <span class="legend-color public-4"></span>
-        <span class="legend-color public-5"></span>
-      </div>
-      Public Land ($50K–$250K)
-    </div>
-    <div class="legend-item"><span class="legend-color private-initial"></span> Existing Private Land</div>
-    <div class="legend-item"><span class="legend-color private-player"></span> Your Purchased Land</div>
-    <div class="legend-item"><span class="legend-color" style="outline: 2px solid black;"></span> Landlocked Public</div>
+  <div id="size-selector" style="text-align: center; margin-bottom: 2rem;">
+    <p style="font-weight: bold;">Choose a board size to start:</p>
+    <button onclick="startGame(10)">10x10 (Mobile-friendly, $1M start)</button>
+    <button onclick="startGame(20)">20x20 (Classic, $2M start)</button>
   </div>
 
-  <div id="summary"></div>
-  <div id="status"></div>
-  <div id="lobbying-controls" style="text-align: center; margin-bottom: 1rem;">
-    <label for="lobbying-amount">Lobbying Amount: $</label>
-    <input type="number" id="lobbying-amount" min="50000" max="500000" step="50000" value="50000" style="width: 100px;">
-    <button onclick="lobby()" id="lobby-button">Lobby (Costs Full Turn)</button>
+  <div id="game-container" style="display: none;">
+    <div id="legend">
+      <div class="legend-item">
+        <div style="display: flex; align-items: center; gap: 0.25rem;">
+          <span class="legend-color public-1"></span>
+          <span class="legend-color public-2"></span>
+          <span class="legend-color public-3"></span>
+          <span class="legend-color public-4"></span>
+          <span class="legend-color public-5"></span>
+        </div>
+        Public Land ($50K–$250K)
+      </div>
+      <div class="legend-item"><span class="legend-color private-initial"></span> Existing Private Land</div>
+      <div class="legend-item"><span class="legend-color private-player"></span> Your Purchased Land</div>
+      <div class="legend-item"><span class="legend-color" style="outline: 2px solid black;"></span> Landlocked Public</div>
+    </div>
+
+    <div id="summary"></div>
+    <div id="status"></div>
+    <div id="lobbying-controls" style="text-align: center; margin-bottom: 1rem;">
+      <label for="lobbying-amount">Lobbying Amount: $</label>
+      <input type="number" id="lobbying-amount" min="50000" max="500000" step="50000" value="50000" style="width: 100px;">
+      <button onclick="lobby()" id="lobby-button">Lobby (Costs Full Turn)</button>
+    </div>
+    <div id="game-board"></div>
+    <div id="endgame-message"></div>
   </div>
-  <div id="game-board"></div>
-  <div id="endgame-message"></div>
 
   <script>
-    const size = 20;
-    let money = 2000000;
-    let backlash = 0;
-    let turn = 1;
-    let purchasesThisTurn = 0;
-    let gameOver = false;
-    const board = [];
+    let size, cellSize, money, backlash, turn, purchasesThisTurn, gameOver, board;
 
-    // Initialize board
-    for (let i = 0; i < size * size; i++) {
-      const rand = Math.random();
-      let type = 'public';
-      let tier = 1;
-      let cost = 50000;
-      
-      if (rand < 0.1) {
-        type = 'private-initial';
-        cost = 0;
-      } else {
-        const tierRand = Math.random();
-        if (tierRand < 0.3) { tier = 1; cost = 50000; }
-        else if (tierRand < 0.5) { tier = 2; cost = 100000; }
-        else if (tierRand < 0.7) { tier = 3; cost = 150000; }
-        else if (tierRand < 0.9) { tier = 4; cost = 200000; }
-        else { tier = 5; cost = 250000; }
+    function computeCellSize(boardSize) {
+      const horizontalPadding = 32; // body padding, both sides
+      const maxWidth = Math.min(window.innerWidth - horizontalPadding, 700);
+      const gapTotal = boardSize - 1; // 1px gap between cells
+      const computed = Math.floor((maxWidth - gapTotal) / boardSize);
+      const cap = boardSize === 10 ? 40 : 20; // classic 20x20 keeps its original look
+      return Math.max(8, Math.min(computed, cap));
+    }
+
+    function startGame(selectedSize) {
+      size = selectedSize;
+      cellSize = computeCellSize(size);
+      money = size === 10 ? 1000000 : 2000000;
+      backlash = 0;
+      turn = 1;
+      purchasesThisTurn = 0;
+      gameOver = false;
+      board = [];
+
+      // Initialize board
+      for (let i = 0; i < size * size; i++) {
+        const rand = Math.random();
+        let type = 'public';
+        let tier = 1;
+        let cost = 50000;
+
+        if (rand < 0.1) {
+          type = 'private-initial';
+          cost = 0;
+        } else {
+          const tierRand = Math.random();
+          if (tierRand < 0.3) { tier = 1; cost = 50000; }
+          else if (tierRand < 0.5) { tier = 2; cost = 100000; }
+          else if (tierRand < 0.7) { tier = 3; cost = 150000; }
+          else if (tierRand < 0.9) { tier = 4; cost = 200000; }
+          else { tier = 5; cost = 250000; }
+        }
+
+        board.push({ type, tier, bought: false, cost, landlocked: false });
       }
 
-      board.push({ type, tier, bought: false, cost, landlocked: false });
+      document.getElementById('size-selector').style.display = 'none';
+      document.getElementById('game-container').style.display = 'block';
+      document.getElementById('endgame-message').innerHTML = '';
+
+      render();
     }
 
     function getLandlockedSet(allowCorners = true) {
@@ -240,7 +268,8 @@
       const lockedSet = getLandlockedSet(true);
       const boardDiv = document.getElementById('game-board');
       boardDiv.innerHTML = '';
-      
+      boardDiv.style.gridTemplateColumns = `repeat(${size}, ${cellSize}px)`;
+
       board.forEach((cell, i) => {
         const div = document.createElement('div');
         let cellClass = cell.type;
@@ -254,12 +283,14 @@
         if (cell.type === 'public' && !cell.bought) cell.landlocked = locked;
 
         div.className = `cell ${cellClass} ${cell.bought ? 'bought' : ''} ${locked ? 'landlocked' : ''}`;
+        div.style.width = `${cellSize}px`;
+        div.style.height = `${cellSize}px`;
         div.title = `Parcel ${i}\nType: ${cell.type === 'public' ? `Public Tier ${cell.tier}` : cell.type}\nCost: $${cell.cost.toLocaleString()}`;
-        
+
         if (!cell.bought && cell.type === 'public') {
           div.onclick = () => buyCell(i);
         }
-        
+
         boardDiv.appendChild(div);
       });
 
@@ -357,8 +388,11 @@
       }
     }
 
-    // Start the game
-    render();
+    window.addEventListener('resize', () => {
+      if (!board) return;
+      cellSize = computeCellSize(size);
+      render();
+    });
   </script>
 </body>
 </html>
