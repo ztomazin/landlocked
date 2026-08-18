@@ -67,7 +67,7 @@
     #game-board {
       display: grid;
       grid-template-columns: repeat(20, 20px);
-      gap: 1px;
+      gap: 0;
       justify-content: center;
       margin-bottom: 1rem;
     }
@@ -75,7 +75,7 @@
       width: 20px;
       height: 20px;
       cursor: pointer;
-      border-radius: 2px;
+      box-sizing: border-box;
     }
     .public-1 { background-color: #e8f5e8; }
     .public-2 { background-color: #c8e6c8; }
@@ -84,8 +84,7 @@
     .public-5 { background-color: #7fc97f; }
     .private-initial { background-color: #beaed4; }
     .private-player { background-color: #9370DB; }
-    .bought { border: 1px solid black; }
-    .landlocked { background-color: #ffcc80; outline: 2px solid black; outline-offset: -2px; }
+    .landlocked { background-color: #ffcc80; }
 
     #controls, #status {
       text-align: center;
@@ -167,10 +166,24 @@
     function computeCellSize(boardSize) {
       const horizontalPadding = 32; // body padding, both sides
       const maxWidth = Math.min(window.innerWidth - horizontalPadding, 700);
-      const gapTotal = boardSize - 1; // 1px gap between cells
-      const computed = Math.floor((maxWidth - gapTotal) / boardSize);
+      const computed = Math.floor(maxWidth / boardSize);
       const cap = boardSize === 10 ? 40 : 20; // classic 20x20 keeps its original look
       return Math.max(8, Math.min(computed, cap));
+    }
+
+    function neighborIndex(x, y, dx, dy) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || nx >= size || ny < 0 || ny >= size) return -1;
+      return ny * size + nx;
+    }
+
+    // Cells that form the "private territory": existing private land, land the
+    // player bought, and public land currently landlocked under the given set.
+    function isInEnclosure(idx, lockedSet) {
+      const cell = board[idx];
+      if (!cell) return false;
+      if (cell.type === 'private-initial' || cell.bought) return true;
+      return cell.type === 'public' && lockedSet.has(idx);
     }
 
     function startGame(selectedSize) {
@@ -294,7 +307,8 @@
     }
 
     function render() {
-      const lockedSet = getLandlockedSet(true);
+      const cornerCrossingLegal = backlash >= 100;
+      const lockedSet = getLandlockedSet(cornerCrossingLegal);
       const boardDiv = document.getElementById('game-board');
       boardDiv.innerHTML = '';
       boardDiv.style.gridTemplateColumns = `repeat(${size}, ${cellSize}px)`;
@@ -315,6 +329,22 @@
         div.style.width = `${cellSize}px`;
         div.style.height = `${cellSize}px`;
         div.title = `Parcel ${i}\nType: ${cell.type === 'public' ? `Public Tier ${cell.tier}` : cell.type}\nCost: $${cell.cost.toLocaleString()}`;
+
+        // Draw a single continuous border around the whole private/landlocked
+        // territory: only put a border edge where the neighbor isn't part of it.
+        if (isInEnclosure(i, lockedSet)) {
+          const x = i % size, y = Math.floor(i / size);
+          const edge = '2px solid black';
+          const sides = [
+            ['borderTop', neighborIndex(x, y, 0, -1)],
+            ['borderRight', neighborIndex(x, y, 1, 0)],
+            ['borderBottom', neighborIndex(x, y, 0, 1)],
+            ['borderLeft', neighborIndex(x, y, -1, 0)],
+          ];
+          sides.forEach(([prop, neighbor]) => {
+            div.style[prop] = (neighbor === -1 || !isInEnclosure(neighbor, lockedSet)) ? edge : 'none';
+          });
+        }
 
         if (!cell.bought && cell.type === 'public') {
           div.onclick = () => buyCell(i);
@@ -382,7 +412,8 @@
     }
 
     function repriceLand() {
-      const lockedSet = getLandlockedSet(true);
+      const cornerCrossingLegal = backlash >= 100;
+      const lockedSet = getLandlockedSet(cornerCrossingLegal);
       board.forEach((cell, i) => {
         if (cell.type === 'public' && !cell.bought) {
           const appreciationRate = lockedSet.has(i) ? 0.10 : 0.02;
