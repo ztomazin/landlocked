@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Landlocked - Public Land Access Game</title>
+  <meta name="description" content="A satirical game where you play the landowner trying to landlock public land — based on the real corner-crossing legal fight over nearly 16 million acres of inaccessible public land in the West.">
+
+  <meta property="og:title" content="Landlocked — a game about stealing public land access">
+  <meta property="og:description" content="A satirical game where you play the landowner trying to landlock public land — based on the real corner-crossing legal fight over nearly 16 million acres of inaccessible public land in the West.">
+  <meta property="og:image" content="https://dainty-croissant-8574e9.netlify.app/assets/social-preview.png">
+  <meta property="og:url" content="https://dainty-croissant-8574e9.netlify.app">
+  <meta property="og:type" content="website">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Landlocked — a game about stealing public land access">
+  <meta name="twitter:description" content="A satirical game where you play the landowner trying to landlock public land — based on the real corner-crossing legal fight over nearly 16 million acres of inaccessible public land in the West.">
+  <meta name="twitter:image" content="https://dainty-croissant-8574e9.netlify.app/assets/social-preview.png">
+
+  <link rel="icon" type="image/png" href="/assets/favicon.png">
   <style>
     body {
       font-family: sans-serif;
@@ -58,11 +72,6 @@
       height: 20px;
       display: inline-block;
       border: 1px solid #333;
-    }
-    #summary {
-      text-align: center;
-      font-weight: bold;
-      margin-bottom: 1rem;
     }
     #game-board {
       display: grid;
@@ -149,7 +158,6 @@
       <div class="legend-item"><span class="legend-color landlocked"></span> Landlocked Public</div>
     </div>
 
-    <div id="summary"></div>
     <div id="status"></div>
     <div id="lobbying-controls" style="text-align: center; margin-bottom: 1rem;">
       <label for="lobbying-amount">Lobbying Amount: $</label>
@@ -328,7 +336,9 @@
         div.className = `cell ${cellClass} ${cell.bought ? 'bought' : ''} ${locked ? 'landlocked' : ''}`;
         div.style.width = `${cellSize}px`;
         div.style.height = `${cellSize}px`;
-        div.title = `Parcel ${i}\nType: ${cell.type === 'public' ? `Public Tier ${cell.tier}` : cell.type}\nCost: $${cell.cost.toLocaleString()}`;
+        div.title = cell.bought
+          ? `Parcel ${i}\nOwned — Landlocked: no`
+          : `Parcel ${i}\nType: ${cell.type === 'public' ? `Public Tier ${cell.tier}` : cell.type}\nCost: $${cell.cost.toLocaleString()}`;
 
         // Draw a single continuous border around the whole private/landlocked
         // territory: only put a border edge where the neighbor isn't part of it.
@@ -352,19 +362,6 @@
 
         boardDiv.appendChild(div);
       });
-
-      // Calculate stats
-      const lockedParcelsLegal = getLandlockedSet(true).size;
-      const lockedParcelsIllegal = getLandlockedSet(false).size;
-      const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
-      const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
-      const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
-      const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
-      const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
-
-      document.getElementById('summary').innerText =
-        `Controlled (Landlocked) Public Parcels if Corner Crossing Legal: ${lockedParcelsLegal} | ROI: ${roiLegal}x | ` +
-        `Controlled (Landlocked) Public Parcels if Corner Crossing Illegal: ${lockedParcelsIllegal} | ROI: ${roiIllegal}x`;
 
       const playerOwned = board.filter(c => c.bought).length;
       const totalPrivate = board.filter(c => c.type === 'private-initial' || c.bought).length;
@@ -438,18 +435,19 @@
       if (backlash < 100 && availableToBuy) return false;
 
       gameOver = true;
+      const cornerCrossingLegalized = backlash >= 100;
+      const lockedParcels = getLandlockedSet(cornerCrossingLegalized).size;
       const investment = board.filter(c => c.bought).reduce((sum, c) => sum + c.cost, 0);
       const valueLegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(true).has(i))).reduce((sum, c) => sum + c.cost, 0);
       const valueIllegal = board.filter((c, i) => c.bought || (c.type === 'public' && !c.bought && getLandlockedSet(false).has(i))).reduce((sum, c) => sum + c.cost, 0);
       const roiLegal = investment > 0 ? (valueLegal / investment).toFixed(2) : 0;
       const roiIllegal = investment > 0 ? (valueIllegal / investment).toFixed(2) : 0;
       const additionalCost = (valueIllegal - valueLegal).toLocaleString();
-      const cornerCrossingLegalized = backlash >= 100;
       const reason = cornerCrossingLegalized ? 'Public outcry forces corner crossing legalization!' : 'You can no longer afford any public land.';
 
       const resultLine = cornerCrossingLegalized
-        ? `<p>Return on Investment: ${roiLegal}x</p>`
-        : `<p>Return on Investment: ${roiIllegal}x</p>` +
+        ? `<p>Public parcels landlocked: ${lockedParcels}</p><p>Return on Investment: ${roiLegal}x</p>`
+        : `<p>Public parcels landlocked: ${lockedParcels}</p><p>Return on Investment: ${roiIllegal}x</p>` +
           `<p>Additional cost to secure the same number of public parcels if corner crossing were legal: ${additionalCost}</p>`;
 
       document.getElementById('endgame-message').innerHTML =
