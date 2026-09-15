@@ -24,18 +24,31 @@ account, and no upload — the video never leaves your phone.
 
 ## Setting the scale without a tape measure
 
+**The short version: draw two gates, press Start, and let the traffic do the
+rest.** The app finds where each vehicle's tyres touch the road, which gives it
+both the direction of the road and a wheelbase to measure against. Nothing to
+mark, nothing to measure — at the cost of a wider error bar, because it has to
+assume an average wheelbase.
+
+Mark a reference of known length and trace the road edges when you want that
+error bar tightened. The rest of this section explains why.
+
 A camera cannot know how big anything is: the same picture fits a small object
 nearby or a large one far away. One real-world length has to come from
 somewhere — that is geometry, not a missing feature. What it does *not* have to
 be is the distance between the gates, and you never have to step into the road.
 
-Instead:
+Three ways to supply it, in increasing effort and accuracy:
 
-1. **Mark something you know the length of**, lying along the road — a parked
+1. **Nothing at all.** The app finds each vehicle's tyre contact patches. The
+   line between a vehicle's front and rear contact points runs along the road
+   *on the road surface*, so the traffic reveals the road's geometry; and the
+   distance between them is a wheelbase, which stands in as the known length.
+2. **Mark something you know the length of**, lying along the road — a parked
    car, a painted lane stripe, a sheet of plywood at the kerb. Anywhere in the
    frame; it does not need to be near the gates.
-2. **Trace two lines that run along the road** and are parallel on the ground —
-   the far kerb and the centre line usually work best.
+3. **Also trace two lines that run along the road** and are parallel on the
+   ground — the far kerb and the centre line usually work best.
 
 That is enough to recover the geometry of the road surface and compute the gate
 distance itself. No lens data, no camera height, no tilt angle. Against a
@@ -115,8 +128,16 @@ Verified two ways:
 | --- | --- |
 | Synthetic scene, exact ground truth (`npm test`) | worst error **0.22%** across 15–45 mph |
 | Flat rendered video through the real browser UI | three vehicles at 20/30/40 mph, all within **0.3%** |
-| **Perspective** rendered video, browser UI, **nothing measured** | gate distance recovered as **8.000 m against 8.000 m true**; all 14 vehicles detected; every high-confidence speed within **8.9%**, most within 3% |
+| **Perspective** video, browser UI, reference marked + road traced | gate distance **8.000 m against 8.000 m true**; all 14 vehicles detected; every high-confidence speed within **8.9%**, most within 3% |
+| Same video, road direction from **wheel contact patches** | **7.96 m (−0.4%)** |
+| Same video, **nothing marked or measured at all** | **7.99 m (−0.1%)**, self-reported ±9% |
 | Projective geometry against a simulated camera | exact to **0.2%** across heights 1–2.4 m, tilts 5–26°, wide and telephoto lenses, yaw to 25° |
+
+The fully automatic figure is better than the method deserves: that scene's
+median wheelbase is 2.72 m against the 2.80 m the app assumes, so a few percent
+of bias happened to cancel. **The ±9% is the honest claim, not the hit** — and
+the assumed wheelbase is neighbourhood-dependent, so it wants validating against
+local traffic before anyone leans on it.
 
 Those figures are the software's own error. In the field, expect the scale —
 however you set it — to dominate, which is why every measurement is reported
@@ -190,6 +211,7 @@ speed-monitor/
 ├── js/
 │   ├── tracker.js      background model, blob detection, tracking
 │   ├── speedmeter.js   gate geometry, speed, uncertainty
+│   ├── wheels.js       where the tyres touch the road
 │   ├── calibration.js  recovering the scale without measuring
 │   ├── analysis.js     statistics, CSV and report generation
 │   ├── selftest.js     synthetic scene with known ground truth
@@ -231,11 +253,16 @@ Moving it to its own repository later needs no code changes: copy the folder, or
 Working and verified, but young. Worth doing next:
 
 - Field validation against a GPS-verified vehicle across several camera setups.
-- Detector-based tracking as an optional mode: it would fix low-contrast
-  vehicles fragmenting, and would let the traffic-derived scale use a stable
-  vehicle landmark instead of a blob centroid.
-- A magnifier when placing points, to cut tap error — currently the limit on the
-  no-measuring path.
+- **Validating the assumed 2.80 m median wheelbase against real traffic.** It is
+  the floor on the fully automatic mode's accuracy and the most valuable single
+  number to pin down.
+- Wheel detection in poor conditions: heavy shadow under a vehicle fills the
+  clearance gap and the contact patches become unfindable (the code detects this
+  and declines rather than guessing).
+- Detector-based tracking as an optional mode, to stop low-contrast vehicles
+  fragmenting.
+- A magnifier when placing points, to cut tap error — the limit on the
+  marked-reference path.
 - Vehicle counts by hour, for volume as well as speed.
 - Better handling of low light and long shadows.
 - A way to merge several sessions into one multi-day report.

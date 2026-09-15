@@ -152,6 +152,88 @@ distance error *grows* with separation (+/-3% at 6 m, +/-9% at 45 m) while the
 timing error shrinks. For a residential street the two cross at roughly
 8-15 m (25-50 ft).
 
+### Wheel contact patches
+
+The road direction can also be read from the traffic, and the right feature to
+read it from is where the tyres touch the tarmac.
+
+A vehicle's body sits 0.2-0.3 m clear of the road, so only its tyres reach the
+bottom of the silhouette: the lower outline of the blob dips at each wheel and
+lifts between them. Reading that outline needs no gradients, no circle fitting
+and no model - only the mask already computed for tracking - and costs about
+4 microseconds per vehicle per frame, which is 0.02% of the frame budget.
+
+Two things come out of it, neither costing the user anything:
+
+- **A road-direction line, on the road surface.** The line through a vehicle's
+  front and rear contact points runs along the road and lies in the road plane,
+  so it passes through the road's vanishing point. Every frame of every vehicle
+  contributes one, which is why a 40-second clip yields ~400 lines rather than
+  the dozen paths a per-vehicle method gets.
+- **A wheelbase**, which is a known-ish length lying along the road - exactly
+  the shape of reference the calibration wants, and unlike vehicle length it is
+  bounded by two points the software can actually locate.
+
+This is a large improvement on fitting vehicle *centroid* paths. A centroid
+floats above the road and shifts as the silhouette turns with the viewing
+angle, which bends the path. On a rendered perspective scene with a true 8.00 m
+gate separation:
+
+| Road direction from | Recovered |
+| --- | --- |
+| Traced lines (marked by hand) | 8.00 m (+0.0%) |
+| **Wheel contact lines** | **7.96 m (-0.4%)** |
+| Vehicle centroid paths | rejected its own data - see below |
+
+On that same scene the centroid method collected 11 vehicle paths and then
+found none of them straight enough to fit, so it produced no answer at all. An
+earlier, cruder fixture - flat-shaded boxes whose bodies reached the tarmac -
+let the centroid method through at about 13% error. Realistic silhouettes make
+it worse, not better. It is kept only as a last resort for scenes where no
+wheels can be found, and is labelled as rough when it is used.
+
+### Fully automatic scale
+
+With nothing marked at all, each vehicle's own wheelbase stands in for the
+reference. The assumed value matters:
+
+- Wheelbase varies across a mixed fleet by roughly +/-14%, against +/-12% for
+  tyre diameter and +/-13% for vehicle length.
+- But wheelbase is ~88 px in a 320 px processing frame, against ~21 px for a
+  tyre. A one-pixel error costs 1.1% instead of 4.7%.
+- And both its endpoints lie **on the road plane**, so unlike a tyre's diameter
+  (centred 0.37 m up) or a vehicle's centroid, there is no height bias to
+  correct.
+
+**Scaling each vehicle by its own wheelbase would be a mistake.** That gives
+every speed an independent random error, and random error does not cancel in a
+percentile - it fattens the distribution, and the 85th percentile lives in the
+fat tail. Simulated on 400 vehicles drawn from N(30, 4) mph:
+
+| Per-vehicle scale error | Shift in the reported 85th percentile |
+| --- | --- |
+| +/-7% | +0.6 mph |
+| +/-12% | +1.5 mph |
+| +/-20% | +3.4 mph |
+
+It biases upward - making a street look faster than it is, which is the
+direction that gets a citizen report dismissed. So the **median across the
+session** sets one scale for every vehicle instead. That converts the random
+error into a single systematic one, which shifts all speeds proportionally
+without distorting the distribution, and shrinks as 1/sqrt(N): 2.9% at ten
+vehicles, 1.9% at twenty-five, 1.4% at fifty.
+
+What does not shrink is the assumed median wheelbase itself, taken here as
+**2.80 m** with a 9% systematic. That single number is the floor on the
+automatic mode's accuracy, it is fleet- and neighbourhood-dependent, and it is
+the first thing to validate against local traffic before anyone leans on it.
+
+On the rendered scene, with nothing marked or measured at all, the automatic
+mode recovered **7.99 m against 8.00 m true, reporting +/-9%**. The point
+estimate is closer than the method deserves - that fixture's median wheelbase
+is 2.72 m against the assumed 2.80 m, so ~3% of bias happened to be cancelled
+by other small errors. The honest claim is the stated envelope, not the hit.
+
 ### Two ways to get the road direction
 
 The road lines can be traced by hand, or inferred from the traffic: vehicles

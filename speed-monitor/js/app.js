@@ -58,6 +58,10 @@
     liveTrails: {},          // paths still being tracked, keyed by track id
     roadVP: null,            // vanishing point derived from the traffic
     trailsAtLastVP: 0,
+    contactLines: [],        // per-frame wheel-contact lines, on the road plane
+    contactsAtLastVP: 0,
+    wheelRefs: {},           // best wheel segment seen per track
+    autoScale: null,
     droppedOnRescale: 0,
     tracker: null,
     meter: null,
@@ -386,6 +390,24 @@
       if (d > 0) {
         next = { meters: d, sigmaMeters: distanceSigmaMeters(), source: 'measured', warnings: [] };
       }
+    } else if (gatesReady() && state.shapes.ref.length !== 2 && state.roadVP && state.procW) {
+      // Nothing marked: run entirely on what the traffic itself reveals.
+      var auto = recomputeAutoScale();
+      state.autoScale = auto;
+      if (auto && auto.ok) {
+        var fromWheels = state.roadVP.source === 'wheel contact points';
+        var extra = fromWheels ? 0 : 0.15;
+        var rel = Math.sqrt(auto.relSigma * auto.relSigma + extra * extra);
+        next = {
+          meters: auto.meters,
+          relSigma: rel,
+          sigmaMeters: auto.meters * rel,
+          source: fromWheels ? 'wheelbases and wheel paths' : 'vehicle paths (rough)',
+          automatic: true,
+          vehicles: auto.n,
+          warnings: []
+        };
+      }
     } else if (gatesReady() && state.shapes.ref.length === 2 && refMeters() > 0 && state.procW) {
       var opts = {
         gateA: procShape('gateA'),
@@ -455,7 +477,19 @@
     box.hidden = false;
 
     if (state.shapes.ref.length < 2) {
-      box.textContent = 'Mark a reference object to begin.';
+      if (c && c.automatic && c.meters > 0) {
+        box.className = 'scale-status warn-box';
+        box.innerHTML = 'Gate distance: <strong>' + fmt(c.meters / FT_TO_M, 1) + ' ft</strong> (' +
+          fmt(c.meters, 1) + ' m) &middot; &plusmn;' + Math.round(c.relSigma * 100) +
+          '% &middot; worked out entirely from the traffic, using ' + c.vehicles +
+          ' vehicles&rsquo; wheelbases.<br><span class="hint">Nothing was marked or measured. ' +
+          'Marking a reference of known length above would tighten this a lot, because the ' +
+          'assumed average wheelbase is what limits it.</span>';
+        return;
+      }
+      box.textContent = state.roadVP
+        ? 'Reading the road from the traffic\u2026 mark a reference above for a tighter result.'
+        : 'Mark a reference object, or just press Start and let the traffic set the scale.';
       return;
     }
     if (!(refMeters() > 0)) {
@@ -545,6 +579,72 @@
 
   // Vehicles travel parallel to the road, so their paths converge on the road's
   // vanishing point. Collect finished paths and re-estimate as they accumulate.
+  /*
+   * Wheel contact patches, from the mask we already have.
+   *
+   * Two things come out of them, neither costing the user anything: the line
+   * through a vehicle's two contact points runs along the road ON the road
+   * surface, so it points at the road's vanishing point; and the distance
+   * between them is a wheelbase - a known-ish length lying along the road,
+   * which is exactly the shape of reference the calibration wants.
+   */
+  function harvestWheels(tracks, mask) {
+    if (!mask || !window.Wheels) return;
+    for (var i = 0; i < tracks.length; i++) {
+      var tr = tracks[i];
+      var c = window.Wheels.findContactPoints(mask, state.procW, state.procH,
+        { x: tr.bx, y: tr.by, w: tr.bw, h: tr.bh });
+      if (!c) continue;
+      state.contactLines.push({ line: window.Wheels.contactLine(c), w: c.spanPx });
+      // Keep the widest view of each vehicle's wheelbase: the least
+      // foreshortened, so the best reference segment it will ever offer.
+      var best = state.wheelRefs[tr.id];
+      if (!best || c.spanPx > best.spanPx) {
+        state.wheelRefs[tr.id] = { p1: c.front, p2: c.rear, spanPx: c.spanPx };
+      }
+    }
+    if (state.contactLines.length > 1200) {
+      state.contactLines.splice(0, state.contactLines.length - 1200);
+    }
+    if (state.contactLines.length >= 12 &&
+        state.contactLines.length >= state.contactsAtLastVP + 8) {
+      state.contactsAtLastVP = state.contactLines.length;
+      var vp = window.Calibration.vanishingPointFromContacts(
+        state.contactLines, state.procW, state.procH);
+      if (vp.ok) {
+        state.roadVP = vp;
+        recomputeCalibration();
+      }
+    }
+  }
+
+  /*
+   * With nothing marked at all, each vehicle's own wheelbase stands in for a
+   * reference. Scaling each vehicle by its own would give every speed an
+   * independent random error, which fattens the distribution and pushes the
+   * 85th percentile up; so the median across the session sets ONE scale.
+   */
+  function recomputeAutoScale() {
+    if (!gatesReady() || !state.roadVP || !state.procW) return null;
+    var ids = Object.keys(state.wheelRefs);
+    if (ids.length < 5) return null;
+    var obs = [];
+    for (var i = 0; i < ids.length; i++) {
+      var ref = state.wheelRefs[ids[i]];
+      var r = window.Calibration.solve({
+        gateA: procShape('gateA'),
+        gateB: procShape('gateB'),
+        roadVanishingPoint: state.roadVP.vanishingPoint,
+        reference: { p1: ref.p1, p2: ref.p2, meters: window.Calibration.FLEET_WHEELBASE_M }
+      });
+      if (r.ok && r.meters > 0 && isFinite(r.meters)) obs.push({ meters: r.meters });
+    }
+    return window.Calibration.autoScaleFromReferences(obs, {
+      minObservations: 5,
+      priorRelSigma: window.Calibration.FLEET_WHEELBASE_REL_SIGMA
+    });
+  }
+
   function harvestTrails(tracks, t) {
     var i;
     for (i = 0; i < tracks.length; i++) {
@@ -561,12 +661,16 @@
     }
     if (state.trails.length > 120) state.trails.splice(0, state.trails.length - 120);
 
+    // Only fall back to centroid paths if the wheels have not already supplied
+    // a vanishing point: centroids float above the road and drift as the
+    // silhouette turns, which bends the estimate.
+    if (state.roadVP && state.roadVP.source === 'wheel contact points') return;
     if (state.trails.length >= 8 && state.trails.length >= state.trailsAtLastVP + 2) {
       state.trailsAtLastVP = state.trails.length;
-      var vp = window.Calibration.vanishingPointFromTrails(
+      var vp2 = window.Calibration.vanishingPointFromTrails(
         state.trails, state.procW, state.procH);
-      if (vp.ok) {
-        state.roadVP = vp;
+      if (vp2.ok) {
+        state.roadVP = vp2;
         if (state.scaleMode === 'reference') recomputeCalibration();
       }
     }
@@ -717,7 +821,7 @@
       setStatus(el.measureStatus, 'Lighting changed sharply — re-learning the ' +
         'background. Measurements resume in a moment.');
     }
-    if (window.__trace && window.__trace.length < 4000) {
+    if (window.__traceOn && window.__trace && window.__trace.length < 4000) {
       window.__trace.push({
         t: t, blobs: res.blobs.length, tracks: res.tracks.length,
         b: res.blobs.map(function (x) {
@@ -726,6 +830,7 @@
         k: res.tracks.map(function (x) { return [x.id, Math.round(x.cx), Math.round(x.cy), x.hits]; })
       });
     }
+    harvestWheels(res.tracks, res.mask);
     harvestTrails(res.tracks, t);
     var found = state.meter.update(res.tracks, t);
     for (var i = 0; i < found.length; i++) addMeasurement(found[i]);
@@ -1172,8 +1277,11 @@
 
   // Debug hook for the automated tests; harmless in normal use.
   window.__dbg = function () { return state.measurements; };
-  // Test-only: per-frame detection trace, to diagnose missed vehicles.
+  // Test hooks. The per-frame trace stays off unless a harness turns it on:
+  // it is a diagnostic, not something to accumulate during a real session.
   window.__trace = [];
+  window.__traceOn = false;
+  window.__trailsDump = function () { return state.trails; };
   window.__cal = function () {
     return {
       calibration: state.calibration,
@@ -1184,7 +1292,12 @@
       },
       refMeters: refMeters(),
       trails: state.trails.length,
-      vp: state.roadVP ? { used: state.roadVP.tracksUsed, residual: state.roadVP.residual } : null
+      contactLines: state.contactLines.length,
+      wheelRefs: Object.keys(state.wheelRefs).length,
+      autoScale: state.autoScale,
+      vp: state.roadVP ? { source: state.roadVP.source || 'vehicle paths',
+                           used: state.roadVP.tracksUsed || state.roadVP.linesUsed,
+                           residual: state.roadVP.residual } : null
     };
   };
 

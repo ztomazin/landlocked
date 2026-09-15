@@ -392,6 +392,85 @@
    * are long, there are many of them, and each is already averaged over dozens
    * of frames.
    */
+  /*
+   * Solve for the point closest to a set of image lines that should all pass
+   * through it. Solved homogeneously (smallest eigenvector of the scatter
+   * matrix of the lines), so a vanishing point at infinity - a perfectly
+   * square-on camera - is representable rather than a division by zero.
+   *
+   * lines: [{ line: [a, b, c] in image pixels, w: weight }]
+   */
+  function vanishingPointFromLines(lines, procW, procH, options) {
+    var o = options || {};
+    var cx = procW / 2, cy = procH / 2, sc = Math.max(procW, procH) / 2;
+    if (!lines || lines.length < (o.minLines || 4)) {
+      return { ok: false, error: 'Only ' + ((lines && lines.length) || 0) + ' usable lines.' };
+    }
+
+    // Into a normalised frame for conditioning: a line l in image coordinates
+    // becomes [s*a, s*b, a*cx + b*cy + c].
+    var normed = [];
+    for (var i = 0; i < lines.length; i++) {
+      var L = lines[i].line;
+      var n = norm3([L[0] * sc, L[1] * sc, L[0] * cx + L[1] * cy + L[2]]);
+      normed.push({ l: n, w: lines[i].w === undefined ? 1 : lines[i].w });
+    }
+
+    function solveFrom(list) {
+      var M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (var k = 0; k < list.length; k++) {
+        var L = list[k].l, w = list[k].w;
+        for (var r = 0; r < 3; r++) for (var c = 0; c < 3; c++) M[r][c] += w * L[r] * L[c];
+      }
+      return smallestEigenvector(M);
+    }
+
+    var vn = solveFrom(normed);
+
+    // Bootstrap: resample the lines with replacement and re-solve, so the
+    // reported uncertainty reflects how well they actually agree.
+    var samples = [], rng = mulberry32(0xb007);
+    var B = (o.bootstrap === undefined) ? 24 : o.bootstrap;
+    for (var b = 0; b < B; b++) {
+      var pick = [];
+      for (var j = 0; j < normed.length; j++) {
+        pick.push(normed[Math.floor(rng() * normed.length) % normed.length]);
+      }
+      var vb = solveFrom(pick);
+      samples.push(norm3([vb[0] * sc + vb[2] * cx, vb[1] * sc + vb[2] * cy, vb[2]]));
+    }
+
+    var resid = 0, wsum = 0;
+    for (var m = 0; m < normed.length; m++) {
+      var d = normed[m].l[0] * vn[0] + normed[m].l[1] * vn[1] + normed[m].l[2] * vn[2];
+      resid += d * d * normed[m].w;
+      wsum += normed[m].w;
+    }
+    return {
+      ok: true,
+      vanishingPoint: norm3([vn[0] * sc + vn[2] * cx, vn[1] * sc + vn[2] * cy, vn[2]]),
+      samples: samples,
+      linesUsed: normed.length,
+      residual: Math.sqrt(resid / Math.max(1e-9, wsum))
+    };
+  }
+
+  /*
+   * The road's vanishing point from wheel contact lines. Every frame in which a
+   * vehicle's two contact patches are found contributes one line that lies on
+   * the road surface and runs along it - far better evidence than a centroid
+   * path, which floats above the road and wanders as the silhouette turns.
+   */
+  function vanishingPointFromContacts(contactLines, procW, procH, options) {
+    var o = options || {};
+    var res = vanishingPointFromLines(contactLines, procW, procH, {
+      minLines: o.minLines || 12,
+      bootstrap: o.bootstrap
+    });
+    if (res.ok) res.source = 'wheel contact points';
+    return res;
+  }
+
   function vanishingPointFromTrails(trails, procW, procH, options) {
     var o = options || {};
     var minPoints = o.minPoints || 8;
@@ -498,6 +577,53 @@
   }
 
   /*
+   * Turn many per-vehicle reference segments into ONE scale for the session.
+   *
+   * This matters more than it looks. Scaling each vehicle by its own assumed
+   * wheelbase gives every speed an independent random error, and random error
+   * does not cancel in a percentile - it fattens the distribution and pushes
+   * the 85th percentile up, making a street look faster than it is. Taking the
+   * median across the session converts that into a single systematic scale
+   * error, which shrinks as 1/sqrt(N) and shifts every speed proportionally
+   * without distorting the shape of the distribution.
+   *
+   * observations: [{ meters }] - the gate distance each vehicle implies.
+   */
+  function autoScaleFromReferences(observations, options) {
+    var o = options || {};
+    var vals = (observations || []).map(function (x) { return x.meters; })
+      .filter(function (v) { return v > 0 && isFinite(v); })
+      .sort(function (a, b) { return a - b; });
+    var need = o.minObservations || 8;
+    if (vals.length < need) {
+      return { ok: false, error: vals.length + ' of ' + need + ' vehicles measured so far.',
+               n: vals.length, need: need };
+    }
+    var mid = vals.length >> 1;
+    var median = vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+
+    // Spread of the observations themselves, robustly (MAD -> sigma).
+    var devs = vals.map(function (v) { return Math.abs(v - median); })
+      .sort(function (a, b) { return a - b; });
+    var dmid = devs.length >> 1;
+    var mad = devs.length % 2 ? devs[dmid] : (devs[dmid - 1] + devs[dmid]) / 2;
+    var sigma = 1.4826 * mad;
+    // Error in the median, plus the systematic error in the assumed length,
+    // which no amount of sampling can reduce.
+    var samplingRel = median > 0 ? 1.253 * (sigma / median) / Math.sqrt(vals.length) : 0;
+    var priorRel = o.priorRelSigma === undefined ? 0.07 : o.priorRelSigma;
+    return {
+      ok: true,
+      meters: median,
+      n: vals.length,
+      relSigma: Math.sqrt(samplingRel * samplingRel + priorRel * priorRel),
+      samplingRel: samplingRel,
+      priorRel: priorRel,
+      spreadRel: median > 0 ? sigma / median : null
+    };
+  }
+
+  /*
    * A sanity check that costs the user nothing: given a calibration, what
    * length does it imply for the typical vehicle? If that is 9 m or 2 m, the
    * distance is wrong - usually feet entered as metres, or a mis-tapped
@@ -525,6 +651,17 @@
 
   // Only things whose size is genuinely standardised, or that the user can
   // check themselves. Anything approximate says so.
+  // Wheelbase is a length lying ON the road surface between two points the
+  // software can find by itself, which makes it the natural automatic
+  // reference. Spread across a mixed fleet is wider than tyre diameter, but it
+  // is four times the size in pixels, so it measures far more precisely.
+  // The MEDIAN wheelbase, because that is the statistic used - not the mean,
+  // which a few long pickups drag upwards. This single number is the dominant
+  // systematic error in the fully automatic mode and deserves validation
+  // against local traffic before anyone leans on it.
+  var FLEET_WHEELBASE_M = 2.80;
+  var FLEET_WHEELBASE_REL_SIGMA = 0.09;
+
   var REFERENCES = [
     { id: 'custom', label: 'Something else (enter the length)', meters: null, exact: false },
     { id: 'own-car', label: 'Your own car, measured once in the driveway', meters: null, exact: true,
@@ -552,11 +689,16 @@
     vanishingPoint: vanishingPoint,
     fleetScale: fleetScale,
     vanishingPointFromTrails: vanishingPointFromTrails,
+    vanishingPointFromLines: vanishingPointFromLines,
+    vanishingPointFromContacts: vanishingPointFromContacts,
+    autoScaleFromReferences: autoScaleFromReferences,
     fitLineTLS: fitLineTLS,
     smallestEigenvector: smallestEigenvector,
     plausibilityCheck: plausibilityCheck,
     REFERENCES: REFERENCES,
     FLEET_MEDIAN_LENGTH_M: FLEET_MEDIAN_LENGTH_M,
+    FLEET_WHEELBASE_M: FLEET_WHEELBASE_M,
+    FLEET_WHEELBASE_REL_SIGMA: FLEET_WHEELBASE_REL_SIGMA,
     FT_TO_M: FT_TO_M
   };
 })(typeof module !== 'undefined' && module.exports ? module.exports : this);

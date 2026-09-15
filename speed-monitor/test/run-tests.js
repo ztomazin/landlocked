@@ -18,6 +18,7 @@ var G = require(path.join(dir, 'speedmeter.js')).SpeedGeometry;
 var Analysis = require(path.join(dir, 'analysis.js')).Analysis;
 var SelfTest = require(path.join(dir, 'selftest.js')).SelfTest;
 var Calibration = require(path.join(dir, 'calibration.js')).Calibration;
+var Wheels = require(path.join(dir, 'wheels.js')).Wheels;
 
 var passed = 0, failed = 0;
 
@@ -249,8 +250,6 @@ test('CSV escapes separators in free text', function () {
   assert(csv.trim().split('\n').length === 2, 'header plus one row');
 });
 
-console.log('\ncalibration without a tape measure (projective geometry)');
-
 /*
  * A real pinhole camera looking at a flat road. World: X along the road, Y
  * across it, Z up. Used to generate exact image coordinates, so the recovered
@@ -281,6 +280,102 @@ function makeCamera(o) {
     };
   };
 }
+
+console.log('\nfinding where the tyres touch the road');
+
+// Build a mask by hand: a body held clear of the tarmac, standing on wheels.
+function vehicleMask(opts) {
+  var o = opts || {};
+  var w = o.w || 200, h = o.h || 90;
+  var mask = new Uint8Array(w * h);
+  function rect(x0, y0, x1, y1) {
+    for (var y = Math.max(0, y0); y < Math.min(h, y1); y++) {
+      for (var x = Math.max(0, x0); x < Math.min(w, x1); x++) mask[y * w + x] = 1;
+    }
+  }
+  var bx = o.bx === undefined ? 40 : o.bx;
+  var bw = o.bw === undefined ? 120 : o.bw;
+  var bodyTop = o.bodyTop === undefined ? 30 : o.bodyTop;
+  var bodyBottom = o.bodyBottom === undefined ? 58 : o.bodyBottom;
+  var wheelBottom = o.wheelBottom === undefined ? 68 : o.wheelBottom;
+  var ww = o.wheelW === undefined ? 20 : o.wheelW;
+  rect(bx, bodyTop, bx + bw, bodyBottom);
+  if (!o.noWheels) {
+    rect(bx + 12, bodyBottom, bx + 12 + ww, wheelBottom);
+    rect(bx + bw - 12 - ww, bodyBottom, bx + bw - 12, wheelBottom);
+  }
+  if (o.shadow) rect(bx, bodyBottom, bx + bw, wheelBottom);  // shadow fills the gap
+  return { mask: mask, w: w, h: h,
+           box: { x: bx, y: bodyTop, w: bw, h: wheelBottom - bodyTop },
+           trueFront: bx + 12 + ww / 2, trueRear: bx + bw - 12 - ww / 2 };
+}
+
+test('finds both contact patches and the wheelbase between them', function () {
+  var v = vehicleMask();
+  var c = Wheels.findContactPoints(v.mask, v.w, v.h, v.box);
+  assert(c, 'no contact points found');
+  close(c.front.x, v.trueFront, 1, 'front contact');
+  close(c.rear.x, v.trueRear, 1, 'rear contact');
+  close(c.spanPx, v.trueRear - v.trueFront, 1, 'wheelbase in pixels');
+});
+
+test('the contact line runs through the road vanishing point', function () {
+  // Two vehicles at different depths, both on a road receding to a known point.
+  var P = makeCamera({ h: 2.0, pitchDeg: 18, yawDeg: 15 });
+  var lines = [];
+  for (var i = 0; i < 20; i++) {
+    var X = -8 + i * 0.8, Y = 2.5 + (i % 3) * 1.8;
+    var a = P(X - 1.35, Y, 0), b = P(X + 1.35, Y, 0);
+    if (a && b) lines.push({ line: Wheels.contactLine({ front: a, rear: b }), w: 1 });
+  }
+  var vp = Calibration.vanishingPointFromContacts(lines, 640, 360);
+  assert(vp.ok, 'no vanishing point: ' + vp.error);
+  var far = P(1e6, 4.5, 0);
+  var v = vp.vanishingPoint;
+  close(v[0] / v[2], far.x, Math.abs(far.x) * 0.01 + 2, 'vanishing point x');
+  close(v[1] / v[2], far.y, 2, 'vanishing point y');
+});
+
+test('refuses a silhouette with no visible wheels', function () {
+  var v = vehicleMask({ noWheels: true });
+  assert(Wheels.findContactPoints(v.mask, v.w, v.h, v.box) === null,
+    'a flat-bottomed blob has no findable contact patches');
+});
+
+test('refuses when a shadow fills the gap under the vehicle', function () {
+  var v = vehicleMask({ shadow: true });
+  assert(Wheels.findContactPoints(v.mask, v.w, v.h, v.box) === null,
+    'a filled underside must be rejected, not guessed at');
+});
+
+test('refuses blobs that are not side-on vehicles', function () {
+  var v = vehicleMask({ bw: 30 });          // nearly square: a pedestrian, say
+  assert(Wheels.findContactPoints(v.mask, v.w, v.h, { x: 40, y: 30, w: 30, h: 38 }) === null,
+    'square blobs must be rejected');
+});
+
+test('one session scale beats scaling each vehicle separately', function () {
+  // Per-vehicle random error fattens the distribution and inflates the 85th
+  // percentile; the median across a session turns it into a systematic shift.
+  var obs = [];
+  for (var i = 0; i < 40; i++) {
+    obs.push({ meters: 8 * (1 + ((i * 2654435761) % 1000 / 1000 - 0.5) * 0.3) });
+  }
+  var r = Calibration.autoScaleFromReferences(obs, { minObservations: 8, priorRelSigma: 0.09 });
+  assert(r.ok, 'should produce a scale: ' + r.error);
+  close(r.meters, 8, 0.6, 'median should land near the truth');
+  assert(r.samplingRel < r.spreadRel,
+    'the median of N must be tighter than a single observation');
+  assert(r.relSigma >= 0.09, 'the assumed-length error can never be sampled away');
+});
+
+test('holds off until enough vehicles have been seen', function () {
+  var few = Calibration.autoScaleFromReferences([{ meters: 8 }, { meters: 8.2 }],
+    { minObservations: 8 });
+  assert(!few.ok, 'two vehicles is not a session');
+});
+
+console.log('\ncalibration without a tape measure (projective geometry)');
 
 function calibrationScene(camOpts, opts) {
   opts = opts || {};
