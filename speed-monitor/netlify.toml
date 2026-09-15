@@ -1,0 +1,20 @@
+# Deploy this project as its OWN Netlify site, separate from anything else in
+# the repository. In Netlify: New site -> pick this repo -> set
+# "Base directory" to speed-monitor. Netlify then reads this file, and the
+# other project in the repo keeps its own site and its own domain.
+#
+# There is no build step: the site is plain HTML, CSS and JavaScript.
+[build]
+  base = "speed-monitor"
+  publish = "."
+  command = ""
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    # The tool never talks to a server, so lock the page down to its own origin.
+    # No connect-src: there is nowhere for data to be sent, by design.
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; script-src 'self'; style-src 'self'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"
+    Referrer-Policy = "no-referrer"
+    X-Content-Type-Options = "nosniff"
+    Permissions-Policy = "camera=(self), microphone=(), geolocation=(), interest-cohort=()"

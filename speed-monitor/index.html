@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Neighborhood Speed Monitor</title>
+  <meta name="description" content="Measure how fast traffic really moves on your street using just a phone video. Runs entirely on your device — no video is ever uploaded. Produces the 85th-percentile speed data that traffic engineers and city councils actually use.">
+
+  <meta property="og:title" content="Neighborhood Speed Monitor">
+  <meta property="og:description" content="Turn a phone video of your street into speed data you can take to your city council. Runs entirely on your device — no video leaves your phone.">
+  <meta property="og:type" content="website">
+
+  <!-- Inline icon: keeps this project self-contained, with no shared assets. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2312171b'/%3E%3Cpath d='M12 42a20 20 0 0 1 40 0' fill='none' stroke='%234dd4ac' stroke-width='6' stroke-linecap='round'/%3E%3Cpath d='M32 42 46 26' stroke='%23ffb454' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="masthead">
+  <h1>Neighborhood Speed Monitor</h1>
+  <p class="tagline">
+    Point your phone at your street and find out how fast traffic really moves.
+    Everything runs on your device &mdash; no video is uploaded, stored, or sent
+    anywhere. You get the same statistics traffic engineers use, in a report you
+    can hand to your city council.
+  </p>
+  <p class="badge-row">
+    <span class="badge">Works offline</span>
+    <span class="badge">No account</span>
+    <span class="badge">No video leaves your phone</span>
+    <span class="badge">Free &amp; open source</span>
+  </p>
+</header>
+
+<noscript>
+  <p class="card warn">This tool measures speeds in your browser, so it needs
+  JavaScript enabled.</p>
+</noscript>
+
+<main>
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-source">
+    <h2><span class="step">1</span> Choose a video source</h2>
+    <div class="row wrap">
+      <button id="btn-camera" class="primary">Use phone camera</button>
+      <label class="btn" for="file-input">Choose a video file</label>
+      <input type="file" id="file-input" accept="video/*" hidden>
+      <button id="btn-selftest" class="ghost">Check accuracy</button>
+    </div>
+    <p class="hint" id="source-status">No video source yet. The camera needs a
+      secure (https) connection; a recorded file works anywhere.</p>
+    <div id="selftest-out" class="subpanel" hidden></div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-gates" hidden>
+    <h2><span class="step">2</span> Draw two gates across the road</h2>
+    <p class="hint">
+      Tap two points to lay a line across the roadway, then two more for a
+      second line further along. Draw both lines <strong>perpendicular to the
+      curb</strong> and keep them parallel to each other &mdash; a driveway
+      edge, a pavement joint, or a crack in the asphalt makes a good marker.
+    </p>
+
+    <div id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="row wrap" id="scrub-row" hidden>
+      <label for="scrub" class="sr-only">Video position</label>
+      <input type="range" id="scrub" min="0" max="1000" value="0">
+      <span class="mono" id="scrub-label">0.0s</span>
+    </div>
+
+    <div class="row wrap">
+      <button id="btn-gate-a" class="chip active">Gate A <span id="ga-count">0/2</span></button>
+      <button id="btn-gate-b" class="chip">Gate B <span id="gb-count">0/2</span></button>
+      <button id="btn-undo" class="ghost">Undo point</button>
+      <button id="btn-clear" class="ghost">Clear gates</button>
+    </div>
+    <p class="hint" id="gate-status">Placing Gate A: tap the first point.</p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-setup" hidden>
+    <h2><span class="step">3</span> Enter the distance between the gates</h2>
+    <p class="hint">
+      This single number sets the accuracy of every speed you measure, so it is
+      worth getting right. Measure along the curb with a tape measure or a
+      measuring wheel, or use the &ldquo;measure distance&rdquo; tool in a
+      satellite map. A 5% error in this distance means a 5% error in every speed.
+    </p>
+    <div class="grid">
+      <label class="field">
+        <span>Distance between gates</span>
+        <span class="inline">
+          <input type="number" id="distance" min="0" step="0.1" value="60" inputmode="decimal">
+          <select id="distance-unit">
+            <option value="ft">feet</option>
+            <option value="m">metres</option>
+          </select>
+        </span>
+      </label>
+      <label class="field">
+        <span>How precisely did you measure it? <span class="opt">(&plusmn;)</span></span>
+        <span class="inline">
+          <input type="number" id="distance-sigma" min="0" step="0.1" placeholder="auto" inputmode="decimal">
+          <span class="unit-echo" id="sigma-unit">feet</span>
+        </span>
+      </label>
+      <label class="field">
+        <span>Posted speed limit</span>
+        <span class="inline">
+          <input type="number" id="limit" min="0" step="1" value="25" inputmode="numeric">
+          <select id="speed-unit">
+            <option value="mph">mph</option>
+            <option value="kph">km/h</option>
+          </select>
+        </span>
+      </label>
+      <label class="field">
+        <span>Street / location</span>
+        <input type="text" id="location" placeholder="e.g. Elm St between 3rd and 4th">
+      </label>
+      <label class="field">
+        <span>Label for traffic crossing A then B</span>
+        <input type="text" id="label-ab" placeholder="e.g. northbound">
+      </label>
+      <label class="field">
+        <span>Label for traffic crossing B then A</span>
+        <input type="text" id="label-ba" placeholder="e.g. southbound">
+      </label>
+      <label class="field">
+        <span>Your name <span class="opt">(for the report)</span></span>
+        <input type="text" id="observer" placeholder="optional">
+      </label>
+      <label class="field">
+        <span>Notes <span class="opt">(weather, school hours, etc.)</span></span>
+        <input type="text" id="notes" placeholder="optional">
+      </label>
+    </div>
+    <p class="hint" id="scale-readout"></p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-measure" hidden>
+    <h2><span class="step">4</span> Measure</h2>
+    <div class="row wrap">
+      <button id="btn-start" class="primary">Start measuring</button>
+      <button id="btn-stop" hidden>Stop</button>
+      <label class="check"><input type="checkbox" id="chk-boxes" checked> Show tracked objects</label>
+      <label class="check"><input type="checkbox" id="chk-mask"> Show motion mask</label>
+      <label class="check" id="rate-wrap" hidden>
+        Playback
+        <select id="rate">
+          <option value="1">1&times;</option>
+          <option value="2">2&times;</option>
+          <option value="4">4&times;</option>
+        </select>
+      </label>
+    </div>
+    <div class="live">
+      <div>
+        <div class="big" id="live-speed">&mdash;</div>
+        <div class="live-meta" id="live-meta">Waiting for the first vehicle&hellip;</div>
+      </div>
+      <dl class="live-stats">
+        <div><dt>Vehicles</dt><dd id="live-count">0</dd></div>
+        <div><dt>85th pct</dt><dd id="live-p85">&mdash;</dd></div>
+        <div><dt>Frame rate</dt><dd id="live-fps">&mdash;</dd></div>
+      </dl>
+    </div>
+    <p class="hint" id="measure-status"></p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-results" hidden>
+    <h2><span class="step">5</span> Results</h2>
+    <div class="stats" id="stats"></div>
+    <div class="row wrap">
+      <button id="btn-report" class="primary">Copy report</button>
+      <button id="btn-report-dl">Download report (.md)</button>
+      <button id="btn-csv">Download data (.csv)</button>
+      <button id="btn-json" class="ghost">Download session (.json)</button>
+      <button id="btn-reset" class="ghost danger">Clear measurements</button>
+    </div>
+    <p class="hint" id="export-status"></p>
+    <div class="table-wrap">
+      <table id="log">
+        <thead>
+          <tr>
+            <th>#</th><th>Time</th><th>Direction</th><th class="num">Speed</th>
+            <th class="num">&plusmn;95%</th><th>Confidence</th>
+            <th class="num">Est. length</th><th>Notes</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="card" id="card-about">
+    <h2>How it works, and what it cannot do</h2>
+
+    <h3>The measurement</h3>
+    <p>
+      Speed is distance divided by time. You mark two lines across the road and
+      measure the real distance between them; the software finds moving objects
+      in each video frame, follows them, and records the instant each one crosses
+      each line. Crossing times are interpolated <em>between</em> frames, so the
+      timing is finer than the video's frame rate. No lens calibration or
+      perspective model is needed, and the same reference point is used at both
+      lines so that most systematic error cancels out.
+    </p>
+
+    <h3>Accuracy</h3>
+    <p>
+      Against a synthetic scene with a known speed, the software's own error is
+      under 0.5% &mdash; press <strong>Check accuracy</strong> above to run that
+      test yourself. In the field, your error is dominated by how well you
+      measured the distance between the gates. Every measurement is reported with
+      an uncertainty range that accounts for distance error, frame rate, and
+      viewing geometry. To validate a specific setup, have someone drive past at
+      a steady speed shown on their speedometer or a GPS app and compare.
+    </p>
+
+    <h3>Privacy by design</h3>
+    <p>
+      Video frames are processed in memory and discarded. Nothing is uploaded:
+      there is no server, no account, and no analytics. The tool stores speeds,
+      times, and your own notes &mdash; never images, license plates, or faces.
+      It cannot identify a vehicle or a driver, and it is not built to.
+    </p>
+
+    <h3>What this is not</h3>
+    <ul>
+      <li><strong>Not enforcement.</strong> These numbers cannot ticket anyone
+        and are not admissible as an enforcement measurement.</li>
+      <li><strong>Not a substitute for an official speed study.</strong> Its
+        purpose is to show that one is warranted.</li>
+      <li><strong>Not for confronting drivers.</strong> Aggregate data brought to
+        a council meeting changes streets; roadside confrontations do not.</li>
+    </ul>
+
+    <h3>Staying safe and lawful</h3>
+    <p>
+      Film from a pavement, driveway, or private property well back from moving
+      traffic &mdash; never from the roadway, and never in a way that distracts
+      drivers. Rules on recording in public vary by jurisdiction; check your
+      local ones. Do not film into private homes or yards.
+    </p>
+
+    <h3>Using the data for policy</h3>
+    <p>
+      The <strong>85th percentile speed</strong> is the number that matters: the
+      speed at or below which 85% of drivers travel. Traffic engineers use it to
+      evaluate speed limits and traffic calming requests, so a report built around
+      it is hard to wave away. Measure for at least 30&ndash;60 minutes, repeat at
+      different times of day and on different days, and bring the report plus the
+      CSV to whoever runs your city's traffic calming program.
+    </p>
+    <p class="hint">
+      Full method and error model: <a href="docs/METHOD.md">docs/METHOD.md</a>.
+    </p>
+  </section>
+</main>
+
+<footer>
+  <p>
+    An AI for Good project. Built to be forked, checked, and improved &mdash;
+    <a href="README.md">read the source and the method</a>.
+  </p>
+</footer>
+
+<canvas id="work" hidden></canvas>
+
+<script src="js/tracker.js"></script>
+<script src="js/speedmeter.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/selftest.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
