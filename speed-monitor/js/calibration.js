@@ -577,6 +577,151 @@
   }
 
   /*
+   * Find the clusters in a set of positive measurements, at whatever scale they
+   * arrive in. A Gaussian kernel density on a grid, then the local maxima; the
+   * bandwidth is relative, so this works on raw ratios with no units.
+   */
+  function findClusters(values, options) {
+    var o = options || {};
+    var vals = values.filter(function (v) { return v > 0 && isFinite(v); })
+      .sort(function (a, b) { return a - b; });
+    var n = vals.length;
+    if (n < (o.minPoints || 8)) return [];
+    var mid = vals[n >> 1] || 1;
+    var bw = (o.bandwidthRel === undefined ? 0.022 : o.bandwidthRel) * mid;
+    if (!(bw > 0)) return [];
+
+    var lo = vals[0] - 3 * bw, hi = vals[n - 1] + 3 * bw;
+    var steps = o.steps || 220, dens = new Float64Array(steps), xs = new Float64Array(steps);
+    for (var i = 0; i < steps; i++) {
+      var x = lo + (hi - lo) * i / (steps - 1);
+      xs[i] = x;
+      var d = 0;
+      for (var j = 0; j < n; j++) {
+        var u = (x - vals[j]) / bw;
+        if (u > -3.5 && u < 3.5) d += Math.exp(-0.5 * u * u);
+      }
+      dens[i] = d;
+    }
+
+    var peaks = [];
+    for (var k = 1; k < steps - 1; k++) {
+      if (dens[k] >= dens[k - 1] && dens[k] > dens[k + 1]) {
+        var centre = xs[k], count = 0;
+        for (var m = 0; m < n; m++) if (Math.abs(vals[m] - centre) < 2 * bw) count++;
+        peaks.push({ centre: centre, share: count / n, density: dens[k] });
+      }
+    }
+    return peaks;
+  }
+
+  /*
+   * Set the session scale from the shape of the traffic, not from its average.
+   *
+   * ratios: each vehicle's wheelbase as a fraction of the gate separation, all
+   * in the rectified plane, so they are dimensionless and directly comparable.
+   *
+   * Why not the median: wheelbase is not smoothly distributed. It forms two
+   * clusters - light vehicles around 2.70m (a compact car is 2.68 and a small
+   * crossover 2.69, so they are the same population for this purpose) and
+   * pickups around 3.62m. The median falls in the sparse gap between them and
+   * therefore slides with the local mix: simulation puts it at +3% on a
+   * car-heavy street and -12% where half the traffic is pickups. The light
+   * cluster, by contrast, sits in the same place everywhere; only its share
+   * moves. Locating it holds to about +/-0.2% across realistic mixes.
+   */
+  var LIGHT_WHEELBASE_M = 2.70;       // the light-vehicle cluster
+  var HEAVY_WHEELBASE_M = 3.62;       // pickups; used only to recognise them
+  var LIGHT_PRIOR_REL_SIGMA = 0.045;  // how well that cluster's position is known
+
+  function scaleFromClusters(ratios, options) {
+    var o = options || {};
+    var clean = (ratios || []).filter(function (v) { return v > 0 && isFinite(v); });
+    var need = o.minObservations || 10;
+    if (clean.length < need) {
+      return { ok: false, error: clean.length + ' of ' + need + ' vehicles measured so far.',
+               n: clean.length, need: need };
+    }
+    var peaks = findClusters(clean, o);
+    if (!peaks.length) {
+      return { ok: false, error: 'No clear vehicle size grouping yet.', n: clean.length };
+    }
+
+    /*
+     * The lowest grouping holding a real share of the traffic is the light
+     * vehicles. A thin one still counts, because on a truck-heavy street the
+     * cars are a minority and are exactly what we want to measure against.
+     *
+     * Two guards stop that generosity backfiring. A grouping must contain a
+     * minimum NUMBER of vehicles, not just a share, so two stray detections
+     * cannot invent one; and it must not sit far below the bulk of the traffic,
+     * which keeps a handful of motorcycles (wheelbase ~1.4m) from being taken
+     * for small cars and halving the scale.
+     */
+    var minShare = o.minShare === undefined ? 0.05 : o.minShare;
+    var minCount = o.minCount === undefined ? 3 : o.minCount;
+    var sorted = clean.slice().sort(function (a, b) { return a - b; });
+    var mid2 = sorted.length >> 1;
+    var medianRatio = sorted.length % 2 ? sorted[mid2] : (sorted[mid2 - 1] + sorted[mid2]) / 2;
+    var floor = (o.lowestPlausibleRel === undefined ? 0.62 : o.lowestPlausibleRel) * medianRatio;
+
+    var light = null, rejectedLow = 0;
+    for (var i = 0; i < peaks.length; i++) {
+      if (peaks[i].share * clean.length < minCount) continue;
+      if (peaks[i].share < minShare) continue;
+      if (peaks[i].centre < floor) { rejectedLow++; continue; }
+      light = peaks[i];
+      break;
+    }
+    if (!light) {
+      return { ok: false, n: clean.length,
+               error: 'No vehicle size grouping large enough to trust yet.' };
+    }
+
+    // A second grouping at roughly 3.62/2.70 confirms we are looking at cars
+    // and pickups, and therefore that the lower one really is the cars.
+    var expected = HEAVY_WHEELBASE_M / LIGHT_WHEELBASE_M;
+    var heavy = null;
+    for (var j = 0; j < peaks.length; j++) {
+      var r = peaks[j].centre / light.centre;
+      if (r > expected * 0.82 && r < expected * 1.22 && peaks[j].share >= 0.04) {
+        heavy = peaks[j];
+        break;
+      }
+    }
+
+    var meters = LIGHT_WHEELBASE_M / light.centre;
+    var samplingRel = 0.03 / Math.sqrt(clean.length);
+    var warnings = [];
+    var priorRel = LIGHT_PRIOR_REL_SIGMA;
+
+    if (!heavy) {
+      /*
+       * One grouping only. This is genuinely ambiguous: a street where every
+       * vehicle is a pickup produces the same picture as a street of compact
+       * cars, scaled. Ordinary cars are much the commoner case, so assume them
+       * - but widen the error bar to admit the assumption rather than hide it.
+       */
+      priorRel = o.ambiguousRelSigma === undefined ? 0.09 : o.ambiguousRelSigma;
+      warnings.push('All the traffic measured is one size, so the scale assumes ' +
+        'these are ordinary cars. If this street carries mainly pickups or vans, ' +
+        'mark a reference object of known length instead.');
+    }
+
+    return {
+      ok: true,
+      meters: meters,
+      n: clean.length,
+      relSigma: Math.sqrt(priorRel * priorRel + samplingRel * samplingRel),
+      lightShare: light.share,
+      twoPopulations: !!heavy,
+      clusters: peaks.length,
+      rejectedLowGroupings: rejectedLow,
+      warnings: warnings
+    };
+  }
+
+  /*
    * Turn many per-vehicle reference segments into ONE scale for the session.
    *
    * This matters more than it looks. Scaling each vehicle by its own assumed
@@ -692,6 +837,8 @@
     vanishingPointFromLines: vanishingPointFromLines,
     vanishingPointFromContacts: vanishingPointFromContacts,
     autoScaleFromReferences: autoScaleFromReferences,
+    scaleFromClusters: scaleFromClusters,
+    findClusters: findClusters,
     fitLineTLS: fitLineTLS,
     smallestEigenvector: smallestEigenvector,
     plausibilityCheck: plausibilityCheck,
@@ -699,6 +846,8 @@
     FLEET_MEDIAN_LENGTH_M: FLEET_MEDIAN_LENGTH_M,
     FLEET_WHEELBASE_M: FLEET_WHEELBASE_M,
     FLEET_WHEELBASE_REL_SIGMA: FLEET_WHEELBASE_REL_SIGMA,
+    LIGHT_WHEELBASE_M: LIGHT_WHEELBASE_M,
+    HEAVY_WHEELBASE_M: HEAVY_WHEELBASE_M,
     FT_TO_M: FT_TO_M
   };
 })(typeof module !== 'undefined' && module.exports ? module.exports : this);

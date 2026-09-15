@@ -369,6 +369,96 @@ test('one session scale beats scaling each vehicle separately', function () {
   assert(r.relSigma >= 0.09, 'the assumed-length error can never be sampled away');
 });
 
+// Draw a fleet of wheelbases from a neighbourhood mix, as ratios of a known
+// gate separation - which is what the app actually measures.
+var VEHICLE_CLASSES = {
+  compact: [2.68, 0.05], midsize: [2.83, 0.03], crossover: [2.69, 0.03],
+  largeSUV: [2.97, 0.09], minivan: [3.03, 0.04], pickup: [3.62, 0.20]
+};
+function fleetRatios(mix, n, gateMetres, seed) {
+  var rng = SelfTest.mulberry32(seed || 5), out = [];
+  function gauss() {
+    return Math.sqrt(-2 * Math.log(1 - rng())) * Math.cos(2 * Math.PI * rng());
+  }
+  var names = Object.keys(mix);
+  for (var i = 0; i < n; i++) {
+    var r = rng(), acc = 0, pick = names[0];
+    for (var j = 0; j < names.length; j++) {
+      acc += mix[names[j]];
+      if (r <= acc) { pick = names[j]; break; }
+    }
+    var cls = VEHICLE_CLASSES[pick];
+    out.push((cls[0] + gauss() * cls[1]) / gateMetres);
+  }
+  return out;
+}
+var URBAN = { compact: .40, midsize: .25, crossover: .25, largeSUV: .05, minivan: .02, pickup: .03 };
+var SUBURB = { compact: .18, midsize: .17, crossover: .33, largeSUV: .13, minivan: .06, pickup: .13 };
+var TRUCKS = { compact: .06, midsize: .08, crossover: .21, largeSUV: .13, minivan: .02, pickup: .50 };
+
+test('the automatic scale barely moves between neighbourhoods', function () {
+  // The whole point: an average wheelbase slides with the local fleet mix
+  // (about -12% where half the traffic is pickups). Locating the light-vehicle
+  // group instead should hold across very different streets.
+  [['urban', URBAN], ['suburban', SUBURB], ['truck-heavy', TRUCKS]].forEach(function (pair) {
+    var ratios = fleetRatios(pair[1], 60, 20, 9);
+    var r = Calibration.scaleFromClusters(ratios, { minObservations: 10 });
+    assert(r.ok, pair[0] + ': ' + r.error);
+    var err = Math.abs(r.meters - 20) / 20;
+    assert(err < 0.04, pair[0] + ' scale off by ' + (err * 100).toFixed(1) + '%');
+  });
+});
+
+test('an average wheelbase really would slide with the mix', function () {
+  // Guards the reasoning behind the above, so nobody "simplifies" it back.
+  function medianOf(a) {
+    var s2 = a.slice().sort(function (x, y) { return x - y; });
+    var m = s2.length >> 1;
+    return s2.length % 2 ? s2[m] : (s2[m - 1] + s2[m]) / 2;
+  }
+  var urbanMed = medianOf(fleetRatios(URBAN, 200, 20, 3)) * 20;
+  var truckMed = medianOf(fleetRatios(TRUCKS, 200, 20, 3)) * 20;
+  assert(truckMed - urbanMed > 0.2,
+    'median wheelbase should differ markedly between these fleets, got ' +
+    urbanMed.toFixed(2) + ' vs ' + truckMed.toFixed(2));
+});
+
+test('notices when the traffic is all one size, and says so', function () {
+  var oneSize = fleetRatios({ compact: .55, crossover: .45 }, 50, 20, 7);
+  var r = Calibration.scaleFromClusters(oneSize, { minObservations: 10 });
+  assert(r.ok, 'should still produce a scale');
+  assert(!r.twoPopulations, 'should report that only one size group was seen');
+  assert(r.warnings.length > 0, 'should warn that it is assuming ordinary cars');
+  assert(r.relSigma > 0.07, 'an assumed population deserves a wider error bar, got ' +
+    (r.relSigma * 100).toFixed(1) + '%');
+});
+
+test('a mixed street confirms its own sizing and reports tighter', function () {
+  var mixed = Calibration.scaleFromClusters(fleetRatios(TRUCKS, 60, 20, 11), { minObservations: 10 });
+  var single = Calibration.scaleFromClusters(fleetRatios({ compact: 1 }, 60, 20, 11), { minObservations: 10 });
+  assert(mixed.ok && single.ok, 'both should solve');
+  assert(mixed.twoPopulations, 'cars and pickups together should be recognised');
+  assert(mixed.relSigma < single.relSigma,
+    'seeing both populations should be reported as more certain than assuming one');
+});
+
+test('a few motorcycles do not halve the scale', function () {
+  var cars = fleetRatios({ compact: .5, midsize: .25, crossover: .25 }, 40, 20, 13);
+  var bikes = [1.40 / 20, 1.42 / 20, 1.38 / 20, 1.44 / 20];
+  var r = Calibration.scaleFromClusters(cars.concat(bikes), { minObservations: 10 });
+  assert(r.ok, 'should still solve: ' + r.error);
+  close(r.meters, 20, 1.0, 'scale with motorcycles present');
+  assert(r.rejectedLowGroupings > 0, 'the motorcycle grouping should be recorded as rejected');
+});
+
+test('finds the groupings in a two-population fleet', function () {
+  var vals = [2.70, 2.68, 2.71, 2.69, 2.72, 2.67, 2.70, 2.66, 3.60, 3.65, 3.58, 3.70];
+  var cl = Calibration.findClusters(vals);
+  assert(cl.length === 2, 'expected two groupings, got ' + cl.length);
+  close(cl[0].centre, 2.69, 0.05, 'light grouping');
+  close(cl[1].centre, 3.63, 0.08, 'heavy grouping');
+});
+
 test('holds off until enough vehicles have been seen', function () {
   var few = Calibration.autoScaleFromReferences([{ meters: 8 }, { meters: 8.2 }],
     { minObservations: 8 });

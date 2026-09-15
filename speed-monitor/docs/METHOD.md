@@ -223,12 +223,14 @@ error into a single systematic one, which shifts all speeds proportionally
 without distorting the distribution, and shrinks as 1/sqrt(N): 2.9% at ten
 vehicles, 1.9% at twenty-five, 1.4% at fifty.
 
-What does not shrink is the assumed median wheelbase itself, taken here as
-**2.80 m** with a 9% systematic.
+What does not shrink is the assumed wheelbase itself - and **which** wheelbase
+is assumed turns out to matter more than anything else here.
 
-**That 9% is too optimistic, and the median is the wrong statistic.** Simulating
-sessions of 60 vehicles against realistic fleet mixes shows the median tracking
-the local mix badly:
+### Why an average wheelbase was the wrong statistic
+
+The first version took the median of the session. Simulating sessions of 60
+vehicles against realistic fleet mixes shows the median tracking the local mix
+badly:
 
 | Neighbourhood | Scale error using the median |
 | --- | --- |
@@ -238,8 +240,7 @@ the local mix badly:
 | 85% pickups | **-21.6%** |
 
 The median sits in the sparse gap between the light-vehicle cluster (~2.70 m)
-and the pickup cluster (~3.62 m), so it slides with the mix. Two better
-statistics, and a limit that no statistic can pass, are set out below.
+and the pickup cluster (~3.62 m), so it slides with the mix.
 
 ### Locating the light-vehicle cluster instead
 
@@ -252,16 +253,31 @@ neighbourhood. Only its *share* changes.
 So estimate the position of the lowest cluster rather than a fixed percentile,
 which depends on that share:
 
-| Method | Dense urban | Suburban | Truck-heavy |
-| --- | --- | --- | --- |
-| Median (as shipped) | +3.1% | +1.0% | -11.6% |
-| 10th percentile | +1.0% | +0.4% | -0.4% |
-| **Lowest cluster peak** | **+0.2%** | **+0.2%** | **+0.1%** |
+| Method | Dense urban | Suburban | Truck-heavy | 85% pickups |
+| --- | --- | --- | --- | --- |
+| Median (the first attempt) | +3.1% | +1.0% | -11.6% | -21.6% |
+| 10th percentile | +1.0% | +0.4% | -0.4% | -8.4% |
+| **Lowest cluster peak (shipped)** | **+0.2%** | **+0.1%** | **-0.2%** | **-2.2%** |
+
+Classification was considered and rejected. Segmenting vehicles into classes and
+using per-class wheelbases reaches a 2.9% spread across neighbourhoods at
+*perfect* accuracy and 4.6% at 75% - worse than simply locating the cluster,
+which needs no classifier at all. The reason is that the classes are not
+separable in the first place: a compact car is 2.68 m and a small crossover
+2.69 m. The only meaningful division is light versus pickup, and that is exactly
+what the two clusters already are.
 
 The cluster peak is essentially neighbourhood-independent across realistic
 mixes, and it is also *less* noisy than the median on short sessions (+/-0.4%
 against +/-1.4% at 60 vehicles), because the light cluster is tight while the
-median wanders in the gap.
+median wanders in the gap. On a ten-vehicle session it is already within
++/-1.5%.
+
+Two guards keep the generosity of accepting a thin cluster from backfiring. A
+grouping must hold a minimum number of vehicles, not merely a share, so a couple
+of stray detections cannot invent one; and it must not sit far below the bulk of
+the traffic, which stops a handful of motorcycles (wheelbase ~1.4 m) being taken
+for small cars and halving the scale.
 
 ### The limit no statistic can pass
 
@@ -271,10 +287,23 @@ information about which cluster it is. At 95% pickups every method above fails
 by about 20%, and no amount of cleverness recovers it - the scene is genuinely
 ambiguous and needs one real-world length.
 
-What the software *can* do is notice the ambiguity: two clusters separated by a
-ratio near 3.62/2.70 = 1.34 are identifiable, a single cluster is not. When
-there is only one cluster the honest response is a much wider error bar and a
-prompt to mark a reference object, not a confident number.
+What the software *can* do is notice the ambiguity, and it does. Two clusters
+separated by a ratio near 3.62/2.70 = 1.34 identify themselves as cars and
+pickups, which confirms that the lower one really is the cars; the app says so
+and reports about +/-5%. A single cluster cannot be identified, so the app
+assumes ordinary cars - much the commoner case - widens the error bar to +/-9%,
+and says in as many words that it is assuming, and that a street of mainly
+pickups should mark a reference instead.
+
+That last case is a stated assumption rather than a measurement, and on a street
+that really is 95% pickups the answer will be about 20% low, outside its own
+error bar. There is no statistic that fixes it, only a marked reference.
+
+Measured end to end on the rendered perspective scene, with nothing marked or
+measured at all: **7.87 m against 8.00 m true, -1.7%, self-reported +/-5%**, with
+both size groups correctly recognised. The earlier median-based version happened
+to score -0.1% on that same clip because the fixture's median wheelbase was close
+to what it assumed - luck that would not have survived a different street.
 
 On the rendered scene, with nothing marked or measured at all, the automatic
 mode recovered **7.99 m against 8.00 m true, reporting +/-9%**. The point

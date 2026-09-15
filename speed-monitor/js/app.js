@@ -405,7 +405,8 @@
           source: fromWheels ? 'wheelbases and wheel paths' : 'vehicle paths (rough)',
           automatic: true,
           vehicles: auto.n,
-          warnings: []
+          twoPopulations: auto.twoPopulations,
+          warnings: auto.warnings || []
         };
       }
     } else if (gatesReady() && state.shapes.ref.length === 2 && refMeters() > 0 && state.procW) {
@@ -482,9 +483,11 @@
         box.innerHTML = 'Gate distance: <strong>' + fmt(c.meters / FT_TO_M, 1) + ' ft</strong> (' +
           fmt(c.meters, 1) + ' m) &middot; &plusmn;' + Math.round(c.relSigma * 100) +
           '% &middot; worked out entirely from the traffic, using ' + c.vehicles +
-          ' vehicles&rsquo; wheelbases.<br><span class="hint">Nothing was marked or measured. ' +
-          'Marking a reference of known length above would tighten this a lot, because the ' +
-          'assumed average wheelbase is what limits it.</span>';
+          ' vehicles&rsquo; wheelbases' +
+          (c.twoPopulations ? ' (cars and larger vehicles both seen, which confirms the sizing)' : '') +
+          '.<br><span class="hint">Nothing was marked or measured. ' +
+          ((c.warnings && c.warnings.length) ? escapeHtml(c.warnings.join(' ')) + ' ' : '') +
+          'Marking a reference of known length above would tighten this.</span>';
         return;
       }
       box.textContent = state.roadVP
@@ -619,30 +622,42 @@
   }
 
   /*
-   * With nothing marked at all, each vehicle's own wheelbase stands in for a
-   * reference. Scaling each vehicle by its own would give every speed an
-   * independent random error, which fattens the distribution and pushes the
-   * 85th percentile up; so the median across the session sets ONE scale.
+   * With nothing marked at all, the traffic's own wheelbases set the scale.
+   *
+   * Each vehicle contributes its wheelbase as a fraction of the gate
+   * separation, both measured in the rectified plane, so the numbers are
+   * dimensionless. What is done with them matters:
+   *
+   * - Scaling each vehicle by its own assumed wheelbase would give every speed
+   *   an independent random error, and random error does not cancel in a
+   *   percentile - it fattens the distribution and pushes the 85th percentile
+   *   up, making a street look faster than it is.
+   * - Averaging them all is no better, because wheelbase is not smoothly
+   *   distributed. It forms two groups, light vehicles near 2.70m and pickups
+   *   near 3.62m, and an average lands in the empty gap between them and slides
+   *   with the local mix: about -12% where half the traffic is pickups.
+   *
+   * So the light-vehicle group is located instead. It sits in the same place in
+   * every neighbourhood; only its share of the traffic changes.
    */
   function recomputeAutoScale() {
     if (!gatesReady() || !state.roadVP || !state.procW) return null;
     var ids = Object.keys(state.wheelRefs);
-    if (ids.length < 5) return null;
-    var obs = [];
+    if (ids.length < 10) return null;
+    var ratios = [];
     for (var i = 0; i < ids.length; i++) {
       var ref = state.wheelRefs[ids[i]];
       var r = window.Calibration.solve({
         gateA: procShape('gateA'),
         gateB: procShape('gateB'),
         roadVanishingPoint: state.roadVP.vanishingPoint,
-        reference: { p1: ref.p1, p2: ref.p2, meters: window.Calibration.FLEET_WHEELBASE_M }
+        reference: { p1: ref.p1, p2: ref.p2, meters: 1 }   // nominal: only the ratio is used
       });
-      if (r.ok && r.meters > 0 && isFinite(r.meters)) obs.push({ meters: r.meters });
+      if (r.ok && r.gateSpanRectified > 0 && r.referenceRectified > 0) {
+        ratios.push(r.referenceRectified / r.gateSpanRectified);
+      }
     }
-    return window.Calibration.autoScaleFromReferences(obs, {
-      minObservations: 5,
-      priorRelSigma: window.Calibration.FLEET_WHEELBASE_REL_SIGMA
-    });
+    return window.Calibration.scaleFromClusters(ratios, { minObservations: 10 });
   }
 
   function harvestTrails(tracks, t) {

@@ -137,13 +137,19 @@ The fully automatic figure is better than the method deserves: that scene's
 median wheelbase is 2.72 m against the 2.80 m the app assumes, so a few percent
 of bias happened to cancel.
 
-**Known limitation — the ±9% is too optimistic in some neighbourhoods.** The
-automatic mode currently takes the median wheelbase of the session, and the
-median slides with the local fleet mix: simulation puts it at +3% in a
-car-heavy area but **−12% where half the traffic is pickups**. Locating the
-light-vehicle cluster instead of taking the median removes almost all of that
-(±0.2% across realistic mixes); see [docs/METHOD.md](docs/METHOD.md). Until that
-lands, **mark a reference object** if your street carries a lot of trucks.
+The automatic mode does **not** average the wheelbases it sees. Wheelbase is
+not smoothly distributed — it forms two groups, light vehicles near 2.70 m and
+pickups near 3.62 m — so an average lands in the empty gap between them and
+slides with the local fleet mix (about −12% where half the traffic is pickups).
+Instead the app locates the light-vehicle group, which sits in the same place in
+every neighbourhood; only its share changes. That holds to about ±0.2% from a
+car-heavy street to a truck-heavy one.
+
+When it sees both groups it says so and reports ±5%. When all the traffic is one
+size it cannot tell a street of compact cars from a street of pickups — the two
+look identical, scaled — so it assumes ordinary cars, widens to ±9%, and says
+that it is assuming. **On a street that is mostly pickups, mark a reference
+object.**
 
 Those figures are the software's own error. In the field, expect the scale —
 however you set it — to dominate, which is why every measurement is reported
