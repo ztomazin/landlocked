@@ -135,9 +135,15 @@ Verified two ways:
 
 The fully automatic figure is better than the method deserves: that scene's
 median wheelbase is 2.72 m against the 2.80 m the app assumes, so a few percent
-of bias happened to cancel. **The ±9% is the honest claim, not the hit** — and
-the assumed wheelbase is neighbourhood-dependent, so it wants validating against
-local traffic before anyone leans on it.
+of bias happened to cancel.
+
+**Known limitation — the ±9% is too optimistic in some neighbourhoods.** The
+automatic mode currently takes the median wheelbase of the session, and the
+median slides with the local fleet mix: simulation puts it at +3% in a
+car-heavy area but **−12% where half the traffic is pickups**. Locating the
+light-vehicle cluster instead of taking the median removes almost all of that
+(±0.2% across realistic mixes); see [docs/METHOD.md](docs/METHOD.md). Until that
+lands, **mark a reference object** if your street carries a lot of trucks.
 
 Those figures are the software's own error. In the field, expect the scale —
 however you set it — to dominate, which is why every measurement is reported

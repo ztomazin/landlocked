@@ -224,9 +224,57 @@ without distorting the distribution, and shrinks as 1/sqrt(N): 2.9% at ten
 vehicles, 1.9% at twenty-five, 1.4% at fifty.
 
 What does not shrink is the assumed median wheelbase itself, taken here as
-**2.80 m** with a 9% systematic. That single number is the floor on the
-automatic mode's accuracy, it is fleet- and neighbourhood-dependent, and it is
-the first thing to validate against local traffic before anyone leans on it.
+**2.80 m** with a 9% systematic.
+
+**That 9% is too optimistic, and the median is the wrong statistic.** Simulating
+sessions of 60 vehicles against realistic fleet mixes shows the median tracking
+the local mix badly:
+
+| Neighbourhood | Scale error using the median |
+| --- | --- |
+| Dense urban, few trucks | +3.1% |
+| Typical suburban | +1.0% |
+| Truck-heavy | **-11.6%** |
+| 85% pickups | **-21.6%** |
+
+The median sits in the sparse gap between the light-vehicle cluster (~2.70 m)
+and the pickup cluster (~3.62 m), so it slides with the mix. Two better
+statistics, and a limit that no statistic can pass, are set out below.
+
+### Locating the light-vehicle cluster instead
+
+Classes barely differ where it matters: a compact car is 2.68 m and a small
+crossover 2.69 m. Fine-grained classification buys nothing. What the
+distribution really has is two clusters - light vehicles near 2.70 m and
+pickups near 3.62 m - and the light cluster sits in the same place in every
+neighbourhood. Only its *share* changes.
+
+So estimate the position of the lowest cluster rather than a fixed percentile,
+which depends on that share:
+
+| Method | Dense urban | Suburban | Truck-heavy |
+| --- | --- | --- | --- |
+| Median (as shipped) | +3.1% | +1.0% | -11.6% |
+| 10th percentile | +1.0% | +0.4% | -0.4% |
+| **Lowest cluster peak** | **+0.2%** | **+0.2%** | **+0.1%** |
+
+The cluster peak is essentially neighbourhood-independent across realistic
+mixes, and it is also *less* noisy than the median on short sessions (+/-0.4%
+against +/-1.4% at 60 vehicles), because the light cluster is tight while the
+median wanders in the gap.
+
+### The limit no statistic can pass
+
+A street where every vehicle is a pickup produces exactly the same picture as a
+street where every vehicle is a compact car, scaled. One cluster carries no
+information about which cluster it is. At 95% pickups every method above fails
+by about 20%, and no amount of cleverness recovers it - the scene is genuinely
+ambiguous and needs one real-world length.
+
+What the software *can* do is notice the ambiguity: two clusters separated by a
+ratio near 3.62/2.70 = 1.34 are identifiable, a single cluster is not. When
+there is only one cluster the honest response is a much wider error bar and a
+prompt to mark a reference object, not a confident number.
 
 On the rendered scene, with nothing marked or measured at all, the automatic
 mode recovered **7.99 m against 8.00 m true, reporting +/-9%**. The point
