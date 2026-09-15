@@ -147,9 +147,11 @@ button.chip.active { background: var(--accent); color: #0b1215; border-color: va
 }
 .field { display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; color: var(--ink-dim); }
 .field input, .field select { width: 100%; }
-.field .inline { display: flex; gap: .4rem; }
-.field .inline input { min-width: 0; flex: 1 1 auto; }
-.field .inline select { flex: 0 0 auto; }
+.field .inline { display: flex; gap: .4rem; min-width: 0; }
+/* The number must stay readable: give it a real basis and let the unit picker
+   be the one that shrinks, or both collapse and the value becomes invisible. */
+.field .inline input { flex: 1 1 5rem; min-width: 3.5rem; width: auto; }
+.field .inline select { flex: 0 1 auto; min-width: 0; }
 .unit-echo { align-self: center; font-size: .82rem; }
 
 /* --- live readout ---------------------------------------------------- */
@@ -234,3 +236,31 @@ footer {
   font-size: .82rem;
   text-align: center;
 }
+
+/* --- scale calibration ----------------------------------------------- */
+.scale-status {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: .6rem .75rem;
+  margin: .75rem 0 .5rem;
+  font-size: .87rem;
+}
+.scale-status.bad { border-left-color: var(--warn); color: #ffc9c9; }
+.scale-status.warn-box { border-left-color: var(--accent-2); }
+.scale-status strong { font-variant-numeric: tabular-nums; }
+
+#scale-modes { margin-bottom: .25rem; }
+
+details#manual-road {
+  margin-top: .75rem;
+  border-top: 1px solid var(--line);
+  padding-top: .6rem;
+}
+details#manual-road summary {
+  cursor: pointer;
+  font-size: .85rem;
+  color: var(--ink-dim);
+}
+details#manual-road summary:hover { color: var(--ink); }

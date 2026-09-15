@@ -24,6 +24,13 @@
     btnGateA: $('btn-gate-a'), btnGateB: $('btn-gate-b'), gaCount: $('ga-count'),
     gbCount: $('gb-count'), btnUndo: $('btn-undo'), btnClear: $('btn-clear'),
     gateStatus: $('gate-status'),
+    scaleModes: $('scale-modes'), scaleReference: $('scale-reference'),
+    scaleMeasured: $('scale-measured'), scaleStatus: $('scale-status'),
+    btnRef: $('btn-ref'), refCount: $('ref-count'), btnUndoRef: $('btn-undo-ref'),
+    refPreset: $('ref-preset'), refLength: $('ref-length'), refUnit: $('ref-unit'),
+    refNote: $('ref-note'), btnRoad1: $('btn-road1'), btnRoad2: $('btn-road2'),
+    r1Count: $('r1-count'), r2Count: $('r2-count'), btnClearRoad: $('btn-clear-road'),
+    plausibility: $('plausibility'),
     distance: $('distance'), distanceUnit: $('distance-unit'), distanceSigma: $('distance-sigma'),
     sigmaUnit: $('sigma-unit'), limit: $('limit'), speedUnit: $('speed-unit'),
     location: $('location'), labelAB: $('label-ab'), labelBA: $('label-ba'),
@@ -42,8 +49,16 @@
     stream: null,
     fileName: null,
     procW: 0, procH: 0,
-    gates: { A: [], B: [] }, // normalised [0..1] video coordinates
-    active: 'A',
+    // Every tapped shape, in normalised [0..1] video coordinates.
+    shapes: { gateA: [], gateB: [], ref: [], road1: [], road2: [] },
+    active: 'gateA',
+    scaleMode: 'reference',
+    calibration: null,       // last computed scale {meters, relSigma, source}
+    trails: [],              // finished vehicle paths, for the vanishing point
+    liveTrails: {},          // paths still being tracked, keyed by track id
+    roadVP: null,            // vanishing point derived from the traffic
+    trailsAtLastVP: 0,
+    droppedOnRescale: 0,
     tracker: null,
     meter: null,
     running: false,
@@ -88,13 +103,24 @@
   }
 
   function gatesReady() {
-    return state.gates.A.length === 2 && state.gates.B.length === 2;
+    return state.shapes.gateA.length === 2 && state.shapes.gateB.length === 2;
   }
 
-  function procGate(name) {
-    return state.gates[name].map(function (p) {
+  function procShape(name) {
+    return state.shapes[name].map(function (p) {
       return { x: p.x * state.procW, y: p.y * state.procH };
     });
+  }
+
+  function refMeters() {
+    var v = parseFloat(el.refLength.value);
+    if (!(v > 0)) return 0;
+    return el.refUnit.value === 'ft' ? v * FT_TO_M : v;
+  }
+
+  // The scale is usable once we have a distance, however it was obtained.
+  function scaleReady() {
+    return !!(state.calibration && state.calibration.meters > 0);
   }
 
   function setStatus(node, text, cls) {
@@ -122,7 +148,7 @@
   /* ------------------------------------------------------------- settings */
 
   var SETTING_FIELDS = ['distance', 'distanceUnit', 'distanceSigma', 'limit',
-    'speedUnit', 'location', 'labelAB', 'labelBA', 'observer'];
+    'speedUnit', 'location', 'labelAB', 'labelBA', 'observer', 'refLength', 'refUnit'];
 
   function saveSettings() {
     try {
@@ -224,7 +250,8 @@
     el.work.height = state.procH;
     el.scrub.disabled = !isFinite(el.video.duration);
     state.tracker = null;
-    updateScale();
+    recomputeCalibration();
+    updateReadout();
   });
 
   el.video.addEventListener('ended', function () { if (state.running) stopMeasuring('Video finished.'); });
@@ -260,74 +287,340 @@
     var nx = (ev.clientX - r.left) / r.width;
     var ny = (ev.clientY - r.top) / r.height;
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    var g = state.gates[state.active];
-    if (g.length >= 2) g.length = 0; // a third tap restarts this gate
+    var g = state.shapes[state.active];
+    if (g.length >= 2) g.length = 0; // a third tap restarts this shape
     g.push({ x: nx, y: ny });
-    if (g.length === 2 && state.active === 'A' && state.gates.B.length < 2) setActive('B');
+    if (g.length === 2 && state.active === 'gateA' && state.shapes.gateB.length < 2) {
+      setActive('gateB');
+    } else if (g.length === 2 && state.active === 'road1' && state.shapes.road2.length < 2) {
+      setActive('road2');
+    }
     refreshGateUI();
   });
+
+  var SHAPE_BUTTONS = {
+    gateA: 'btnGateA', gateB: 'btnGateB', ref: 'btnRef',
+    road1: 'btnRoad1', road2: 'btnRoad2'
+  };
 
   function setActive(name) {
     state.active = name;
-    el.btnGateA.classList.toggle('active', name === 'A');
-    el.btnGateB.classList.toggle('active', name === 'B');
+    Object.keys(SHAPE_BUTTONS).forEach(function (k) {
+      var b = el[SHAPE_BUTTONS[k]];
+      if (b) b.classList.toggle('active', k === name);
+    });
   }
+
+  var SHAPE_LABELS = {
+    gateA: 'Gate A', gateB: 'Gate B', ref: 'the reference object',
+    road1: 'road line 1', road2: 'road line 2'
+  };
 
   function refreshGateUI() {
-    el.gaCount.textContent = state.gates.A.length + '/2';
-    el.gbCount.textContent = state.gates.B.length + '/2';
-    var g = state.gates[state.active];
+    el.gaCount.textContent = state.shapes.gateA.length + '/2';
+    el.gbCount.textContent = state.shapes.gateB.length + '/2';
+    el.refCount.textContent = state.shapes.ref.length + '/2';
+    el.r1Count.textContent = state.shapes.road1.length + '/2';
+    el.r2Count.textContent = state.shapes.road2.length + '/2';
+
+    var g = state.shapes[state.active];
+    var label = SHAPE_LABELS[state.active];
     var msg;
-    if (gatesReady()) msg = 'Both gates placed. Tap a gate button to redraw one.';
-    else if (g.length === 0) msg = 'Placing Gate ' + state.active + ': tap the first point, at one kerb.';
-    else msg = 'Placing Gate ' + state.active + ': tap the second point, at the far kerb.';
+    if (state.active === 'gateA' || state.active === 'gateB') {
+      if (gatesReady()) msg = 'Both gates placed. Tap a gate button to redraw one.';
+      else if (g.length === 0) msg = 'Placing ' + label + ': tap the first point, at one kerb.';
+      else msg = 'Placing ' + label + ': tap the second point, at the far kerb.';
+    } else if (state.active === 'ref') {
+      msg = g.length === 0
+        ? 'Tap one end of the reference object, at ground level.'
+        : (g.length === 1 ? 'Now tap its other end.' : 'Reference marked.');
+    } else {
+      msg = g.length < 2
+        ? 'Trace ' + label + ': tap a point near you, then one as far down the road as you can see.'
+        : label + ' traced.';
+    }
     setStatus(el.gateStatus, msg);
-    updateScale();
-    el.btnStart.disabled = !(gatesReady() && distanceMeters() > 0);
+    recomputeCalibration();
+    updateReadout();
+    // Timing works without a scale, so measuring only needs the gates.
+    el.btnStart.disabled = !gatesReady();
   }
 
-  el.btnGateA.addEventListener('click', function () { setActive('A'); refreshGateUI(); });
-  el.btnGateB.addEventListener('click', function () { setActive('B'); refreshGateUI(); });
+  Object.keys(SHAPE_BUTTONS).forEach(function (name) {
+    var b = el[SHAPE_BUTTONS[name]];
+    if (b) b.addEventListener('click', function () { setActive(name); refreshGateUI(); });
+  });
   el.btnUndo.addEventListener('click', function () {
-    var g = state.gates[state.active];
+    var g = state.shapes[state.active];
     if (g.length) g.pop();
-    else if (state.active === 'B') { setActive('A'); state.gates.A.pop(); }
+    else if (state.active === 'gateB') { setActive('gateA'); state.shapes.gateA.pop(); }
+    refreshGateUI();
+  });
+  el.btnUndoRef.addEventListener('click', function () {
+    if (state.shapes.ref.length) state.shapes.ref.pop();
+    setActive('ref');
     refreshGateUI();
   });
   el.btnClear.addEventListener('click', function () {
-    state.gates.A = []; state.gates.B = [];
-    setActive('A'); refreshGateUI();
+    state.shapes.gateA = []; state.shapes.gateB = [];
+    setActive('gateA'); refreshGateUI();
+  });
+  el.btnClearRoad.addEventListener('click', function () {
+    state.shapes.road1 = []; state.shapes.road2 = [];
+    setActive('road1'); refreshGateUI();
   });
 
-  // Reports the image scale and warns when the gates are too close together to
-  // time accurately, which is the most common setup mistake.
-  function updateScale() {
-    if (!gatesReady() || !state.procW) { el.scaleReadout.textContent = ''; return; }
-    var sep = window.SpeedGeometry.gateSeparation(procGate('A'), procGate('B'));
-    var d = distanceMeters();
+  /*
+   * Work out the ground distance between the gates.
+   *
+   * Either the user measured it, or it is recovered from the road's geometry:
+   * the vanishing point (from the paths of passing vehicles, or from traced
+   * road lines) plus a reference object of known length. See calibration.js.
+   */
+  function recomputeCalibration() {
+    var before = state.calibration ? state.calibration.meters : null;
+    var next = null;
+
+    if (state.scaleMode === 'measured') {
+      var d = distanceMeters();
+      if (d > 0) {
+        next = { meters: d, sigmaMeters: distanceSigmaMeters(), source: 'measured', warnings: [] };
+      }
+    } else if (gatesReady() && state.shapes.ref.length === 2 && refMeters() > 0 && state.procW) {
+      var opts = {
+        gateA: procShape('gateA'),
+        gateB: procShape('gateB'),
+        reference: { p1: procShape('ref')[0], p2: procShape('ref')[1], meters: refMeters() },
+        tapSigmaPx: 2
+      };
+      var haveRoads = state.shapes.road1.length === 2 && state.shapes.road2.length === 2;
+      if (haveRoads) {
+        opts.roadLines = [procShape('road1'), procShape('road2')];
+      } else if (state.roadVP) {
+        opts.roadVanishingPoint = state.roadVP.vanishingPoint;
+        opts.roadVanishingPointSamples = state.roadVP.samples;
+        /*
+         * A road direction inferred from the traffic is convenient but only
+         * approximate: a blob's centroid shifts as the vehicle's silhouette
+         * turns with the viewing angle, which bends the path slightly and
+         * biases the vanishing point. Measured at about 13% on a test scene
+         * where marked road lines were exact, so it is carried as a systematic
+         * term rather than quietly ignored.
+         */
+        opts.extraSystematicRel = 0.15;
+      }
+      if (haveRoads || state.roadVP) {
+        var r = window.Calibration.computeGateDistance(opts);
+        if (r.ok) {
+          next = {
+            meters: r.meters,
+            sigmaMeters: r.sigmaMeters,
+            relSigma: r.relSigma,
+            source: haveRoads ? 'traced road lines' : 'vehicle paths',
+            tracksUsed: state.roadVP ? state.roadVP.tracksUsed : 0,
+            warnings: r.warnings || []
+          };
+        } else {
+          next = { error: r.error, warnings: [] };
+        }
+      }
+    }
+
+    var changed = !next !== !state.calibration ||
+      (next && next.meters && Math.abs((next.meters || 0) - (before || 0)) > 1e-6);
+    state.calibration = next;
+    if (changed) applyCalibration();
+    renderScaleStatus();
+  }
+
+  // Push the current scale into the meter and re-price everything already
+  // measured, so speeds recorded before the scale settled are not lost.
+  function applyCalibration() {
+    if (!state.meter) return;
+    var c = state.calibration;
+    state.meter.configure({
+      distanceMeters: c && c.meters > 0 ? c.meters : 0,
+      distanceSigmaMeters: c ? (c.sigmaMeters !== undefined ? c.sigmaMeters : null) : null
+    });
+    var res = state.meter.rescaleAll(state.measurements);
+    state.droppedOnRescale += res.dropped;
+    state.measurements = res.kept;
+    renderResults();
+  }
+
+  function renderScaleStatus() {
+    var c = state.calibration, box = el.scaleStatus;
+    box.className = 'scale-status';
+    if (state.scaleMode === 'measured') { box.hidden = true; return; }
+    box.hidden = false;
+
+    if (state.shapes.ref.length < 2) {
+      box.textContent = 'Mark a reference object to begin.';
+      return;
+    }
+    if (!(refMeters() > 0)) {
+      box.textContent = 'Now enter how long that object really is.';
+      return;
+    }
+    if (!gatesReady()) { box.textContent = 'Draw both gates to compute the scale.'; return; }
+
+    if (c && c.error) {
+      box.className = 'scale-status bad';
+      box.textContent = c.error;
+      return;
+    }
+    if (!c) {
+      var seen = state.trails.length;
+      box.textContent = 'Waiting for the traffic to reveal the road direction \u2014 ' +
+        seen + ' vehicle path' + (seen === 1 ? '' : 's') + ' so far, 8 needed. ' +
+        'You can start measuring now; speeds will fill in once the scale is known.';
+      return;
+    }
+
+    var ft = c.meters / FT_TO_M;
+    var pct = c.relSigma ? Math.round(c.relSigma * 100) : null;
+    var parts = ['Gate distance: <strong>' + fmt(ft, 1) + ' ft</strong> (' + fmt(c.meters, 1) + ' m)'];
+    if (pct !== null) parts.push('&plusmn;' + pct + '%');
+    parts.push('from ' + c.source + (c.tracksUsed ? ' (' + c.tracksUsed + ' paths)' : ''));
+    box.innerHTML = parts.join(' &middot; ') + ' &mdash; no measuring required.';
+    if (c.source === 'vehicle paths') {
+      box.className = 'scale-status warn-box';
+      box.innerHTML += '<br><span class="hint">This road direction was inferred from ' +
+        'the traffic, which is rough. <strong>Trace two road lines above</strong> for a ' +
+        'markedly better figure &mdash; it is the single best thing you can do for accuracy.</span>';
+    }
+    if (c.warnings && c.warnings.length) {
+      box.className = 'scale-status warn-box';
+      box.innerHTML += '<br><span class="hint">' + c.warnings.map(escapeHtml).join(' ') + '</span>';
+    }
+  }
+
+  function escapeHtml(t) {
+    return String(t).replace(/[&<>"]/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch];
+    });
+  }
+
+  // Image scale, plus the warning about gates too close together to time well.
+  function updateReadout() {
+    if (!gatesReady() || !state.procW || !scaleReady()) { el.scaleReadout.textContent = ''; return; }
+    var sep = window.SpeedGeometry.gateSeparation(procShape('gateA'), procShape('gateB'));
+    var d = state.calibration.meters;
     if (!(d > 0) || !(sep > 0)) { el.scaleReadout.textContent = ''; return; }
     var long = Math.max(state.procW, state.procH);
     var msg = 'Gates are ' + fmt(sep, 0) + ' pixels apart in the image (' +
       fmt(d / sep * 100, 1) + ' cm per pixel).';
     var cls = null;
     if (sep < 0.2 * long) {
-      msg += ' That is quite close — move the gates further apart, or film ' +
+      msg += ' That is quite close \u2014 move the gates further apart, or film ' +
         'from further back, for better timing resolution.';
       cls = 'bad';
     }
     setStatus(el.scaleReadout, msg, cls);
   }
 
+  /* ------------------------------------------- the road, from the traffic */
+
+  /*
+   * A track's history, cleaned for vanishing-point fitting.
+   *
+   * Uses the centroid rather than the ground point: a vehicle's centroid also
+   * travels a straight line parallel to the road, so it gives the same
+   * vanishing point, but it is far smoother - the bottom of the box jitters as
+   * the lowest corner of the silhouette switches from one end to the other.
+   * Frames where the box touches the edge of the picture are dropped, since a
+   * clipped box reports a false centre and bends the path.
+   */
+  function cleanPath(trail) {
+    var out = [], m = 2;
+    for (var i = 0; i < trail.length; i++) {
+      var s = trail[i];
+      if (s.bx !== undefined &&
+          (s.bx <= m || s.by <= m ||
+           s.bx + s.bw >= state.procW - m || s.by + s.bh >= state.procH - m)) continue;
+      out.push({ x: s.x, y: s.y });
+    }
+    return out;
+  }
+
+  // Vehicles travel parallel to the road, so their paths converge on the road's
+  // vanishing point. Collect finished paths and re-estimate as they accumulate.
+  function harvestTrails(tracks, t) {
+    var i;
+    for (i = 0; i < tracks.length; i++) {
+      var tr = tracks[i];
+      state.liveTrails[tr.id] = { pts: cleanPath(tr.trail), lastT: t };
+    }
+    var ids = Object.keys(state.liveTrails);
+    for (i = 0; i < ids.length; i++) {
+      var entry = state.liveTrails[ids[i]];
+      if (t - entry.lastT > 0.8) {                 // the vehicle has gone
+        if (entry.pts.length >= 10) state.trails.push(entry.pts);
+        delete state.liveTrails[ids[i]];
+      }
+    }
+    if (state.trails.length > 120) state.trails.splice(0, state.trails.length - 120);
+
+    if (state.trails.length >= 8 && state.trails.length >= state.trailsAtLastVP + 2) {
+      state.trailsAtLastVP = state.trails.length;
+      var vp = window.Calibration.vanishingPointFromTrails(
+        state.trails, state.procW, state.procH);
+      if (vp.ok) {
+        state.roadVP = vp;
+        if (state.scaleMode === 'reference') recomputeCalibration();
+      }
+    }
+  }
+
   ['distance', 'distanceUnit', 'distanceSigma', 'limit', 'speedUnit', 'location',
-    'labelAB', 'labelBA', 'observer', 'notes'].forEach(function (k) {
+    'labelAB', 'labelBA', 'observer', 'notes', 'refLength', 'refUnit'].forEach(function (k) {
     el[k].addEventListener('input', function () {
       el.sigmaUnit.textContent = el.distanceUnit.value === 'ft' ? 'feet' : 'metres';
-      updateScale();
-      el.btnStart.disabled = !(gatesReady() && distanceMeters() > 0);
+      recomputeCalibration();
+      updateReadout();
+      el.btnStart.disabled = !gatesReady();
       saveSettings();
       if (state.measurements.length) renderResults();
     });
   });
+
+  /* ----------------------------------------------- scale mode and presets */
+
+  el.scaleModes.addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-scale-mode]');
+    if (!b) return;
+    state.scaleMode = b.getAttribute('data-scale-mode');
+    Array.prototype.forEach.call(el.scaleModes.children, function (c) {
+      c.classList.toggle('active', c === b);
+    });
+    el.scaleReference.hidden = state.scaleMode !== 'reference';
+    el.scaleMeasured.hidden = state.scaleMode !== 'measured';
+    recomputeCalibration();
+    updateReadout();
+    saveSettings();
+  });
+
+  (function initReferencePresets() {
+    window.Calibration.REFERENCES.forEach(function (r) {
+      var o = document.createElement('option');
+      o.value = r.id;
+      o.textContent = r.label + (r.meters ? ' \u2014 ' + fmt(r.meters / FT_TO_M, 1) + ' ft' : '');
+      el.refPreset.appendChild(o);
+    });
+    el.refPreset.addEventListener('change', function () {
+      var r = window.Calibration.REFERENCES.filter(function (x) {
+        return x.id === el.refPreset.value;
+      })[0];
+      if (!r) return;
+      if (r.meters) {
+        el.refUnit.value = 'm';
+        el.refLength.value = String(Math.round(r.meters * 1000) / 1000);
+      }
+      setStatus(el.refNote, (r.note || '') + (r.exact ? '' : ' Treat this as approximate.'));
+      recomputeCalibration();
+      saveSettings();
+    });
+  })();
 
   /* ------------------------------------------------------------- scrubbing */
 
@@ -340,13 +633,14 @@
   /* ------------------------------------------------------------ measuring */
 
   function startMeasuring() {
-    if (!gatesReady() || !(distanceMeters() > 0)) return;
+    if (!gatesReady()) return;
+    var c = state.calibration;
     state.tracker = new window.MotionTracker(state.procW, state.procH);
     state.meter = new window.SpeedMeter({
-      gateA: procGate('A'),
-      gateB: procGate('B'),
-      distanceMeters: distanceMeters(),
-      distanceSigmaMeters: distanceSigmaMeters()
+      gateA: procShape('gateA'),
+      gateB: procShape('gateB'),
+      distanceMeters: c && c.meters > 0 ? c.meters : 0,
+      distanceSigmaMeters: c && c.sigmaMeters !== undefined ? c.sigmaMeters : null
     });
     state.running = true;
     state.lastFrameT = null;
@@ -357,7 +651,8 @@
     el.scrub.disabled = true;
     el.cardResults.hidden = false;
     setStatus(el.measureStatus, 'Measuring… keep the camera perfectly still. ' +
-      'Moving it invalidates the gates.');
+      'Moving it invalidates the gates.' + (scaleReady() ? ''
+        : ' The scale is not set yet, so speeds will appear once it is.'));
 
     if (state.source === 'file') {
       el.video.playbackRate = parseFloat(el.rate.value) || 1;
@@ -422,6 +717,16 @@
       setStatus(el.measureStatus, 'Lighting changed sharply — re-learning the ' +
         'background. Measurements resume in a moment.');
     }
+    if (window.__trace && window.__trace.length < 4000) {
+      window.__trace.push({
+        t: t, blobs: res.blobs.length, tracks: res.tracks.length,
+        b: res.blobs.map(function (x) {
+          return [Math.round(x.x), Math.round(x.y), Math.round(x.w), Math.round(x.h)];
+        }),
+        k: res.tracks.map(function (x) { return [x.id, Math.round(x.cx), Math.round(x.cy), x.hits]; })
+      });
+    }
+    harvestTrails(res.tracks, t);
     var found = state.meter.update(res.tracks, t);
     for (var i = 0; i < found.length; i++) addMeasurement(found[i]);
     state.rejected = state.meter.rejected;
@@ -430,6 +735,16 @@
 
   function addMeasurement(m) {
     state.measurements.push(m);
+    if (m.pending) {
+      // Timed but not yet scaled: hold it, and fill it in when the scale lands.
+      el.liveSpeed.textContent = '—';
+      el.liveSpeed.classList.remove('over');
+      el.liveMeta.textContent = 'Timed, waiting for the scale · ' +
+        state.measurements.length + ' vehicle' +
+        (state.measurements.length === 1 ? '' : 's') + ' held';
+      renderResults();
+      return;
+    }
     var s = speedOf(m), lim = parseFloat(el.limit.value);
     el.liveSpeed.textContent = fmt(s, 0);
     el.liveSpeed.classList.toggle('over', !!(lim > 0 && s > lim));
@@ -456,8 +771,13 @@
     overlayCtx.clearRect(0, 0, w, h);
 
     if (el.chkMask.checked && state.lastResult && state.lastResult.mask) drawMask(w, h);
-    drawGate('A', state.gates.A, w, h);
-    drawGate('B', state.gates.B, w, h);
+    drawShape('A', state.shapes.gateA, w, h, '#4dd4ac');
+    drawShape('B', state.shapes.gateB, w, h, '#ff7ab6');
+    if (state.scaleMode === 'reference') {
+      drawShape('ref', state.shapes.ref, w, h, '#ffb454', true);
+      drawShape('road 1', state.shapes.road1, w, h, '#8fb3ff', false, true);
+      drawShape('road 2', state.shapes.road2, w, h, '#8fb3ff', false, true);
+    }
 
     if (el.chkBoxes.checked && state.lastResult) {
       var sx = w / state.procW, sy = h / state.procH;
@@ -499,9 +819,10 @@
     overlayCtx.imageSmoothingEnabled = true;
   }
 
-  function drawGate(name, pts, w, h) {
+  function drawShape(name, pts, w, h, color, ticked, dashed) {
     if (!pts.length) return;
-    var color = name === 'A' ? '#4dd4ac' : '#ff7ab6';
+    overlayCtx.save();
+    if (dashed) overlayCtx.setLineDash([7, 5]);
     overlayCtx.strokeStyle = color;
     overlayCtx.fillStyle = color;
     overlayCtx.lineWidth = 3;
@@ -511,14 +832,27 @@
       overlayCtx.fill();
     });
     if (pts.length === 2) {
+      var x0 = pts[0].x * w, y0 = pts[0].y * h, x1 = pts[1].x * w, y1 = pts[1].y * h;
       overlayCtx.beginPath();
-      overlayCtx.moveTo(pts[0].x * w, pts[0].y * h);
-      overlayCtx.lineTo(pts[1].x * w, pts[1].y * h);
+      overlayCtx.moveTo(x0, y0);
+      overlayCtx.lineTo(x1, y1);
       overlayCtx.stroke();
-      var mx = (pts[0].x + pts[1].x) / 2 * w, my = (pts[0].y + pts[1].y) / 2 * h;
+      if (ticked) {   // end caps, so a reference reads as a measured length
+        var dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1;
+        var nx = -dy / L * 8, ny = dx / L * 8;
+        overlayCtx.setLineDash([]);
+        [[x0, y0], [x1, y1]].forEach(function (pt) {
+          overlayCtx.beginPath();
+          overlayCtx.moveTo(pt[0] - nx, pt[1] - ny);
+          overlayCtx.lineTo(pt[0] + nx, pt[1] + ny);
+          overlayCtx.stroke();
+        });
+      }
+      overlayCtx.setLineDash([]);
       overlayCtx.font = 'bold 14px system-ui, sans-serif';
-      overlayCtx.fillText(name, mx + 8, my - 8);
+      overlayCtx.fillText(name, (x0 + x1) / 2 + 8, (y0 + y1) / 2 - 8);
     }
+    overlayCtx.restore();
   }
 
   function drawFlashes(w, h) {
@@ -567,8 +901,12 @@
       sessionStart: start,
       observedSeconds: Math.max(0, observedSeconds),
       isFile: isFile,
-      distanceMeters: distanceMeters(),
-      distanceLabel: (isNaN(d) ? '?' : d) + ' ' + (el.distanceUnit.value === 'ft' ? 'ft' : 'm'),
+      distanceMeters: state.calibration ? state.calibration.meters : 0,
+      distanceLabel: state.calibration && state.calibration.meters
+        ? (Math.round(state.calibration.meters / FT_TO_M * 10) / 10) + ' ft'
+        : ((isNaN(d) ? '?' : d) + ' ' + (el.distanceUnit.value === 'ft' ? 'ft' : 'm')),
+      scaleSource: state.calibration ? state.calibration.source : 'not set',
+      scaleRelSigma: state.calibration ? state.calibration.relSigma : null,
       directionLabels: directionLabels(),
       fps: state.tracker ? state.tracker.fps() : null,
       source: isFile ? ('recorded video (' + state.fileName + ')') : 'live camera',
@@ -588,6 +926,7 @@
 
   function renderResults() {
     if (state.measurements.length) el.cardResults.hidden = false;
+    renderPlausibility();
     var s = currentStats();
     var u = unitLabel();
     el.liveCount.textContent = String(s.n);
@@ -617,6 +956,21 @@
     renderLog();
   }
 
+  /*
+   * A free sanity check: given the current scale, how long is the typical
+   * vehicle? If the answer is 12 m or 1.5 m, the distance is wrong - far better
+   * to learn that here than at a council meeting.
+   */
+  function renderPlausibility() {
+    var lengths = state.measurements.map(function (m) { return m.estLengthM; })
+      .filter(function (v) { return v !== null && v !== undefined; });
+    var r = window.Calibration.plausibilityCheck(lengths);
+    if (r.ok || !r.enough) { el.plausibility.hidden = true; return; }
+    el.plausibility.hidden = false;
+    el.plausibility.className = 'scale-status bad';
+    el.plausibility.textContent = 'Check the scale: ' + r.message;
+  }
+
   function renderLog() {
     el.logBody.textContent = '';
     var labels = directionLabels();
@@ -634,8 +988,8 @@
       cell(String(m.seq));
       cell(fmt(m.videoTime, 1) + 's');
       cell(labels[m.direction] || m.direction);
-      cell(fmt(speedOf(m)) + ' ' + unitLabel(), 'num');
-      cell('±' + fmt(ciOf(m)), 'num');
+      cell(m.pending ? 'awaiting scale' : fmt(speedOf(m)) + ' ' + unitLabel(), 'num');
+      cell(m.pending ? '—' : '±' + fmt(ciOf(m)), 'num');
       var conf = document.createElement('td');
       var pill = document.createElement('span');
       pill.className = 'pill ' + m.confidence;
@@ -680,7 +1034,7 @@
       tool: 'Neighborhood Speed Monitor',
       method: 'two-gate video timing',
       meta: meta(),
-      gatesNormalised: state.gates,
+      gatesNormalised: state.shapes,
       stats: currentStats(),
       measurements: state.measurements,
       rejected: state.rejected
@@ -816,7 +1170,26 @@
   el.btnCamera.addEventListener('click', useCamera);
   el.fileInput.addEventListener('change', function (ev) { useFile(ev.target.files[0]); });
 
+  // Debug hook for the automated tests; harmless in normal use.
+  window.__dbg = function () { return state.measurements; };
+  // Test-only: per-frame detection trace, to diagnose missed vehicles.
+  window.__trace = [];
+  window.__cal = function () {
+    return {
+      calibration: state.calibration,
+      shapes: {
+        gateA: state.shapes.gateA.length, gateB: state.shapes.gateB.length,
+        ref: state.shapes.ref.length,
+        road1: state.shapes.road1.length, road2: state.shapes.road2.length
+      },
+      refMeters: refMeters(),
+      trails: state.trails.length,
+      vp: state.roadVP ? { used: state.roadVP.tracksUsed, residual: state.roadVP.residual } : null
+    };
+  };
+
   loadSettings();
+  setActive('gateA');
   el.sigmaUnit.textContent = el.distanceUnit.value === 'ft' ? 'feet' : 'metres';
   refreshGateUI();
   fitStage();

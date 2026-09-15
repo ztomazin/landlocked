@@ -50,25 +50,37 @@ If more than 45% of the frame becomes foreground at once — an exposure change,
 a cloud, headlights sweeping across — the background is re-seeded and that frame
 produces no measurements, rather than a frame full of phantom vehicles.
 
-### Reference point
+### Reference point: it must be on the road
 
-The **blob centroid** is used as the tracked point at both gates. It is the most
-stable statistic available: it averages over the whole blob and so is far less
-jittery than an edge, which moves as the vehicle's silhouette changes.
+The tracked point is the **bottom-centre of the blob** - where the tyres meet
+the road - not its centroid. This matters more than it sounds.
 
-The centroid sits roughly at mid-vehicle-height rather than on the road surface,
-so its image position is displaced from the true tyre contact point. This matters
-much less than it first appears, for two reasons:
+A gate drawn on the video is the image of a line across the tarmac. A point that
+lies *on the tarmac* crosses that image line at exactly the moment it crosses the
+real line, whatever the camera's height, tilt or lens: the two events are the
+same event. A point *above* the road does not. Seen from a raised camera, a point
+at height Z crosses the drawn line when the vehicle is at `K·X_gate` rather than
+`X_gate`, and because K multiplies both gate positions it does **not** cancel in
+the difference - it scales the whole answer.
 
-1. When the camera looks **roughly perpendicular to the road**, that displacement
-   is almost entirely *across* the direction of travel, not along it — so it
-   barely shifts the crossing instant at all.
-2. Whatever displacement remains is **similar at both gates**, and the
-   measurement depends only on the *difference* `t_B − t_A`, so a constant offset
-   subtracts out.
+K is easy to underestimate. For a camera 3 m up looking 20 degrees down at a
+9 m road, tracking a point 0.72 m above the tarmac gives K = 0.76, inflating
+every speed by about 30%. That is not a rounding error; it is the difference
+between "traffic is fine" and "traffic is dangerous". An early version of this
+tool tracked the centroid and was wrong by exactly that much - a flat test scene
+with no perspective hid it completely, because with no perspective K = 1.
 
-This is the reason the instructions insist on a perpendicular view. Filming down
-the length of the road breaks assumption (1) and introduces a real bias.
+Two useful consequences of using a road-plane point:
+
+- **Lane position does not matter.** Every point on the road plane is unbiased,
+  so near-lane and far-lane vehicles are measured alike.
+- **Ground shadows do not bias the timing.** A shadow stretching the blob along
+  the tarmac moves the tracked point to a different place *on the same plane*,
+  which does not shift the crossing instant.
+
+The centroid is still used for two things it is better at: associating blobs
+between frames, and fitting vehicle paths for the vanishing point, where its
+smoothness matters more than its height.
 
 ### Sub-frame crossing times
 
@@ -90,32 +102,100 @@ A crossing is only accepted if it occurs **within the drawn segment** (with an
 8% margin), so an object passing beyond the end of the line is ignored rather
 than counted.
 
-## 3. Error model
+## 3. Setting the scale without measuring the road
 
-Reported uncertainty combines three independent relative errors in quadrature:
+The gate distance does not have to be the length you know. Anything of known
+length lying along the road will do, anywhere in the frame, because the road's
+geometry can be recovered from the picture itself.
+
+1. Two lines that run along the road and are parallel on the ground - the far
+   kerb and the centre line, say - meet at the road's **vanishing point V1**.
+2. The two gates are parallel on the ground too, so they meet at a second
+   vanishing point **V2**.
+3. The line through V1 and V2 is the **horizon** of the road plane.
+4. Mapping that horizon to infinity rectifies the plane to an affine copy of the
+   real road. Under an affine map, *ratios of lengths measured along a common
+   direction are exactly preserved*.
+5. Therefore `gate separation / reference length` is the same in the rectified
+   image as on the ground. One known length gives the other.
+
+No focal length, no camera height, no tilt, no lens model. The only assumption
+is that the road is locally flat. Tested against a simulated camera, this
+recovers the gate distance to within 0.2% across camera heights of 1-2.4 m,
+tilts of 5-26 degrees, wide and telephoto lenses, and yaws up to 25 degrees -
+and it degrades correctly to the flat case when there is no perspective at all.
+
+### What actually limits it
+
+The geometry is exact; tap precision is not. Perturbing every tapped point by a
+realistic 2 px and re-running the calculation gives, in simulation:
+
+| Change | Reported uncertainty |
+| --- | --- |
+| Road lines traced over 6 m of road | +/- 40% |
+| ...over 27 m | +/- 7% |
+| ...over 75 m | +/- 3% |
+| Reference object 1.8 m long | +/- 6% |
+| ...4.7 m (a car) | +/- 5% |
+| ...12.2 m (a stripe cycle) | +/- 3.6% |
+| Camera 1 m high, 6 degrees down | +/- 7% |
+| Camera 3 m high, 30 degrees down | +/- 2.3% |
+
+So, in order of what to fix first: **trace the road lines as far into the
+distance as you can see them**, use the longest reference you have, and get the
+camera as high as is practical.
+
+Note the reversal from the tape-measure method: there, wider gates are always
+better, because the distance error is fixed and more frames reduce the timing
+error. Here, wider gates mean extrapolating further from the reference, so the
+distance error *grows* with separation (+/-3% at 6 m, +/-9% at 45 m) while the
+timing error shrinks. For a residential street the two cross at roughly
+8-15 m (25-50 ft).
+
+### Two ways to get the road direction
+
+The road lines can be traced by hand, or inferred from the traffic: vehicles
+travel parallel to the road, so their paths converge on V1, and that needs no
+input at all. The app uses the traffic when no lines are traced, and bootstraps
+over the observed paths to report how much the vanishing point is actually
+pinned down.
+
+**Traced lines are markedly better.** On a rendered perspective scene with a
+known 8.00 m gate separation, traced lines recovered 8.000 m while the
+traffic-derived direction came out about 13% short. The reason is that a blob's
+centroid shifts as the vehicle's silhouette turns with the viewing angle, which
+bends the path slightly and drags the vanishing point with it. The
+traffic-derived estimate therefore carries an extra 15% systematic term and the
+app recommends tracing the lines.
+
+## 4. Error model
+
+Reported uncertainty combines independent relative errors in quadrature:
 
 ```
-σ/v = sqrt( (σ_D/D)² + (σ_t/Δt)² + σ_geom² )
+sigma/v = sqrt( (sigma_D/D)^2 + (sigma_t/dt)^2 + sigma_geom^2 )
 ```
 
 | Term | What it is | Default |
 | --- | --- | --- |
-| `σ_D/D` | Error in the measured ground distance | user-supplied; else max(2% of D, 15 cm) |
-| `σ_t/Δt` | Crossing-time interpolation error, both gates | `σ_t = 0.45 × frame interval` |
-| `σ_geom` | Residual parallax and non-parallel gates | 2% |
+| `sigma_D/D` | Error in the gate distance | measured: user-supplied, else max(2% of D, 15 cm). Recovered: from the simulation described above |
+| `sigma_t/dt` | Crossing-time interpolation, both gates | `sigma_t = 0.45 x frame interval` |
+| `sigma_geom` | Residual geometry | 2%, plus 15% when the road direction came from the traffic rather than marked lines |
 
-Results are displayed as a 95% interval (1.96σ).
+Results are displayed as a 95% interval (1.96 sigma).
 
 **Which term dominates.** At 30 mph with gates 60 ft apart and 30 fps video,
-Δt ≈ 1.4 s ≈ 41 frames, so the timing term is about 1%. A distance measured to
-±1 ft in 60 ft is 1.7%. Geometry contributes 2%. Total ≈ 2.8%, or about
-±0.8 mph at 30 mph. Pace out the distance instead of measuring it — say ±5 ft —
-and the distance term becomes 8%, swamping everything else.
+dt is about 1.4 s (41 frames), so the timing term is around 1%. A distance
+measured to +/-1 ft in 60 ft is 1.7%. Pace the distance out instead - say
++/-5 ft - and the distance term becomes 8%, swamping everything else. When the
+distance is recovered rather than measured, its uncertainty is computed by
+simulation and is typically 3-13%, so it dominates too.
 
-**The practical consequence:** measure the distance carefully and place the gates
-far apart. Nothing else you can do matters as much.
+**The practical consequence:** whichever way you set the scale, the scale is
+what limits you. Measure the reference carefully, trace the road lines long, and
+place the gates sensibly. Nothing else you can do matters as much.
 
-## 4. Quality flags
+## 5. Quality flags
 
 Each measurement carries flags, and a confidence of high / medium / low:
 
@@ -125,6 +205,7 @@ Each measurement carries flags, and a confidence of high / medium / low:
 | `occluded` | The track was lost for one or more frames between the gates |
 | `size-change` | Blob area changed by more than 2.5× — often two vehicles merging into one blob |
 | `gate-edge` | Crossed very near the end of a gate, where the geometry is least reliable |
+| `unstable-blob` | The blob's size changed markedly during the pass, usually a low-contrast vehicle breaking into fragments; the timing is not trustworthy |
 
 Measurements outside 3–120 mph are discarded outright and counted separately, so
 the rejection is visible rather than silent.
@@ -132,7 +213,7 @@ the rejection is visible rather than silent.
 An object that crosses the same gate twice (a pedestrian pacing, a vehicle
 reversing) invalidates its own track rather than producing a nonsense speed.
 
-## 5. Object length estimate
+## 6. Object length estimate
 
 Metres-per-pixel is inferred from the gate separation (`D` ÷ perpendicular pixel
 separation) and multiplied by the bounding box extent along the direction of
@@ -140,7 +221,7 @@ travel. Unlike the speed, **this estimate does depend on perspective** and is
 only approximate — enough to separate a pedestrian from a car from a lorry, not
 enough to quote. It is labelled as an estimate everywhere it appears.
 
-## 6. Known failure modes
+## 7. Known failure modes
 
 | Situation | Effect | Mitigation |
 | --- | --- | --- |
@@ -151,9 +232,11 @@ enough to quote. It is labelled as an estimate everywhere it appears.
 | Night, headlights only | Blob is the light pool, not the vehicle | Not currently reliable — a known limitation |
 | Heavy rain, wipers, foliage in wind | Spurious blobs | Min-area filter and the 3–120 mph range remove most; check the log |
 | Vehicle accelerating or braking between gates | Reports the *average* speed over the gate separation | True by definition; note it when reporting |
+| Low-contrast vehicle (grey car, grey tarmac) | Blob fragments part-way across, moving the tracked point; timing can be off by 10-15% | Detected and flagged `unstable-blob`, confidence dropped to low |
+| Two vehicles overlapping at the edge of frame | One track can be handed from the outgoing vehicle to the incoming one | Tracks are dropped the moment they vanish at an edge, and a track re-arms after each completed pass so the second vehicle is still measured |
 | Very low frame rate (below ~15 fps) | Timing term grows | The app displays measured fps; place gates further apart |
 
-## 7. Validating a setup
+## 8. Validating a setup
 
 The synthetic self-test in the app validates the *software* (worst error 0.24%
 across 15–45 mph). It says nothing about your distance measurement or camera

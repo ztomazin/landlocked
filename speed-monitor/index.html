@@ -83,31 +83,98 @@
 
   <!-- ------------------------------------------------------------------ -->
   <section class="card" id="card-setup" hidden>
-    <h2><span class="step">3</span> Enter the distance between the gates</h2>
+    <h2><span class="step">3</span> Set the scale</h2>
     <p class="hint">
-      This single number sets the accuracy of every speed you measure, so it is
-      worth getting right. Measure along the curb with a tape measure or a
-      measuring wheel, or use the &ldquo;measure distance&rdquo; tool in a
-      satellite map. A 5% error in this distance means a 5% error in every speed.
+      A camera alone cannot know how big anything is, so one real-world length
+      has to come from somewhere. It does not have to be the gate distance, and
+      you do not have to go into the road to get it.
     </p>
+
+    <div class="row wrap" id="scale-modes" role="group" aria-label="How to set the scale">
+      <button class="chip active" data-scale-mode="reference">Point at something you know</button>
+      <button class="chip" data-scale-mode="measured">I measured the gate distance</button>
+    </div>
+
+    <!-- ---------------------------------------------------------------- -->
+    <div id="scale-reference">
+      <p class="hint">
+        Two things, both from where you are standing, and no tape measure:
+        mark something whose length you know, and trace the direction of the
+        road. The app then works out the road surface's geometry and computes
+        the gate distance itself &mdash; the reference does not need to be near
+        the gates.
+      </p>
+
+      <p class="hint"><strong>1. Mark something of known length</strong>, lying
+        <em>along</em> the road &mdash; a parked car, a lane stripe. Tap each end
+        at ground level. A longer object gives a better result.</p>
+      <div class="row wrap">
+        <button id="btn-ref" class="chip">Mark the reference <span id="ref-count">0/2</span></button>
+        <button id="btn-undo-ref" class="ghost">Undo point</button>
+      </div>
+
+      <div class="grid">
+        <label class="field">
+          <span>What did you mark?</span>
+          <select id="ref-preset"></select>
+        </label>
+        <label class="field">
+          <span>Its true length</span>
+          <span class="inline">
+            <input type="number" id="ref-length" min="0" step="0.01" value="15" inputmode="decimal">
+            <select id="ref-unit">
+              <option value="ft">feet</option>
+              <option value="m">metres</option>
+            </select>
+          </span>
+        </label>
+      </div>
+      <p class="hint" id="ref-note"></p>
+
+      <p class="hint"><strong>2. Trace two lines that run along the road</strong>
+        and are parallel on the ground &mdash; the far kerb and the centre line
+        usually work best, because you can see them furthest. Trace each one as
+        far into the distance as you can: short traces are the single biggest
+        source of error here.</p>
+      <div class="row wrap">
+        <button id="btn-road1" class="chip">Road line 1 <span id="r1-count">0/2</span></button>
+        <button id="btn-road2" class="chip">Road line 2 <span id="r2-count">0/2</span></button>
+        <button id="btn-clear-road" class="ghost">Clear both</button>
+      </div>
+
+      <div id="scale-status" class="scale-status">Mark a reference object to begin.</div>
+    </div>
+
+    <!-- ---------------------------------------------------------------- -->
+    <div id="scale-measured" hidden>
+      <p class="hint">
+        Measure along the kerb with a tape or a measuring wheel, or use the
+        &ldquo;measure distance&rdquo; tool on a satellite map. A 5% error here
+        is a 5% error in every speed.
+      </p>
+      <div class="grid">
+        <label class="field">
+          <span>Distance between gates</span>
+          <span class="inline">
+            <input type="number" id="distance" min="0" step="0.1" value="60" inputmode="decimal">
+            <select id="distance-unit">
+              <option value="ft">feet</option>
+              <option value="m">metres</option>
+            </select>
+          </span>
+        </label>
+        <label class="field">
+          <span>How precisely? <span class="opt">(&plusmn;)</span></span>
+          <span class="inline">
+            <input type="number" id="distance-sigma" min="0" step="0.1" placeholder="auto" inputmode="decimal">
+            <span class="unit-echo" id="sigma-unit">feet</span>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------------- -->
     <div class="grid">
-      <label class="field">
-        <span>Distance between gates</span>
-        <span class="inline">
-          <input type="number" id="distance" min="0" step="0.1" value="60" inputmode="decimal">
-          <select id="distance-unit">
-            <option value="ft">feet</option>
-            <option value="m">metres</option>
-          </select>
-        </span>
-      </label>
-      <label class="field">
-        <span>How precisely did you measure it? <span class="opt">(&plusmn;)</span></span>
-        <span class="inline">
-          <input type="number" id="distance-sigma" min="0" step="0.1" placeholder="auto" inputmode="decimal">
-          <span class="unit-echo" id="sigma-unit">feet</span>
-        </span>
-      </label>
       <label class="field">
         <span>Posted speed limit</span>
         <span class="inline">
@@ -176,6 +243,7 @@
   <!-- ------------------------------------------------------------------ -->
   <section class="card" id="card-results" hidden>
     <h2><span class="step">5</span> Results</h2>
+    <div id="plausibility" class="scale-status warn-box" hidden></div>
     <div class="stats" id="stats"></div>
     <div class="row wrap">
       <button id="btn-report" class="primary">Copy report</button>
@@ -212,6 +280,23 @@
       timing is finer than the video's frame rate. No lens calibration or
       perspective model is needed, and the same reference point is used at both
       lines so that most systematic error cancels out.
+    </p>
+
+    <h3>Setting the scale without a tape measure</h3>
+    <p>
+      A single camera cannot know how large anything is &mdash; the same image
+      fits a small object nearby or a big one far away. One real-world length
+      must come from somewhere, and that is a fact of geometry, not a missing
+      feature. What it does <em>not</em> have to be is the gate distance.
+    </p>
+    <p>
+      Mark anything in shot whose length you know and that lies along the road.
+      Vehicles travel parallel to the road, so their paths across the frame
+      reveal the road's vanishing point; that plus the two gates fixes the
+      geometry of the road surface, and the known object then sets the scale for
+      gates placed anywhere else in the frame. No lens data, no camera height,
+      no tilt angle. Speeds measured before the scale settles are filled in
+      afterwards, and refined as more traffic passes.
     </p>
 
     <h3>Accuracy</h3>
@@ -277,6 +362,7 @@
 
 <script src="js/tracker.js"></script>
 <script src="js/speedmeter.js"></script>
+<script src="js/calibration.js"></script>
 <script src="js/analysis.js"></script>
 <script src="js/selftest.js"></script>
 <script src="js/app.js"></script>

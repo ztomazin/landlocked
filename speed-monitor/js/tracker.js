@@ -232,10 +232,20 @@
     return { blobs: blobs, tracks: tracks, mask: this.mask, illuminationReset: false };
   };
 
-  // How far a track is allowed to move between frames, in processing pixels.
-  MotionTracker.prototype.matchRadius = function (dt) {
+  /*
+   * How far a track may move between frames, in processing pixels.
+   *
+   * Scaled by the blob's own size, because a vehicle near the camera covers far
+   * more pixels per frame than a distant one - at 38mph in the near lane that
+   * is ~27px per frame, which a fixed radius would drop, losing exactly the
+   * fast vehicles a speed study exists to find. A vehicle almost never moves
+   * more than its own length between frames, so its size is a safe yardstick.
+   */
+  MotionTracker.prototype.matchRadius = function (dt, track) {
     var scale = Math.max(1, dt * 30);
-    return Math.min(0.35 * this.w, Math.max(0.07 * this.w, 0.07 * this.w * scale));
+    var size = track ? Math.max(track.bw || 0, track.bh || 0) : 0;
+    var r = Math.max(0.07 * this.w, 1.6 * size) * scale;
+    return Math.min(0.45 * this.w, r);
   };
 
   MotionTracker.prototype.associate = function (blobs, t, dt) {
@@ -245,21 +255,41 @@
       // Predict with the current velocity: a car at 40mph moves ~10px per frame
       // here, and prediction keeps the association stable at that speed.
       var px = tr.cx + tr.vx * dt, py = tr.cy + tr.vy * dt;
+      var radius = this.matchRadius(dt, tr);
       for (j = 0; j < blobs.length; j++) {
         var b = blobs[j];
-        pairs.push({ i: i, j: j, d: Math.hypot(b.cx - px, b.cy - py) });
+        pairs.push({ i: i, j: j, d: Math.hypot(b.cx - px, b.cy - py), max: radius });
       }
     }
     pairs.sort(function (x, y) { return x.d - y.d; });
 
-    var radius = this.matchRadius(dt);
     var takenTrack = {}, takenBlob = {};
     for (var k = 0; k < pairs.length; k++) {
       var pr = pairs[k];
-      if (pr.d > radius) break;
+      // Per-track radius, so this filters rather than stopping at the first
+      // pair that is too far for its own track.
+      if (pr.d > pr.max) continue;
       if (takenTrack[pr.i] || takenBlob[pr.j]) continue;
+      /*
+       * Reject a match that would require the vehicle to reverse instantly.
+       * Without this, a vehicle leaving at one edge of the frame hands its
+       * track to the next vehicle entering at the same edge - and since that
+       * track has already been through both gates, the new vehicle is never
+       * measured. Losing whole vehicles this way biases a speed study.
+       */
+      var trk = tracks[pr.i], blb = blobs[pr.j];
+      var speed = Math.hypot(trk.vx, trk.vy);
+      if (trk.hits >= 3 && speed > 2) {
+        var gap = Math.max(1e-4, t - trk.t);
+        var nvx = (blb.cx - trk.cx) / gap, nvy = (blb.cy - trk.cy) / gap;
+        // Compare along the established heading, and only veto a decisive
+        // reversal: a blob that momentarily fragments makes the centroid jitter
+        // backwards, and vetoing that would break the track mid-pass.
+        var along = (nvx * trk.vx + nvy * trk.vy) / speed;
+        if (along < -0.25 * speed) continue;
+      }
       takenTrack[pr.i] = takenBlob[pr.j] = true;
-      this.advance(tracks[pr.i], blobs[pr.j], t, dt);
+      this.advance(trk, blb, t, dt);
     }
 
     for (j = 0; j < blobs.length; j++) {
@@ -270,11 +300,20 @@
     for (i = 0; i < tracks.length; i++) {
       var tk = tracks[i];
       if (tk.t !== t) { tk.misses++; tk.missesTotal++; }
-      if (tk.misses <= this.opts.maxMisses) live.push(tk);
+      // A track last seen against the edge of the frame, which then vanishes,
+      // has left the scene: drop it at once rather than letting it coast and be
+      // adopted by the next vehicle to appear there.
+      var gone = tk.misses > 0 && tk.atEdge;
+      if (tk.misses <= this.opts.maxMisses && !gone) live.push(tk);
       if (tk.t === t && tk.hits >= this.opts.confirmHits) reported.push(tk);
     }
     this.tracks = live;
     return reported;
+  };
+
+  MotionTracker.prototype.touchesEdge = function (b) {
+    return b.x <= 1 || b.y <= 1 ||
+           b.x + b.w >= this.w - 1 || b.y + b.h >= this.h - 1;
   };
 
   MotionTracker.prototype.spawn = function (b, t) {
@@ -283,8 +322,9 @@
       cx: b.cx, cy: b.cy, vx: 0, vy: 0,
       bx: b.x, by: b.y, bw: b.w, bh: b.h, area: b.area,
       hits: 1, misses: 0, missesTotal: 0,
+      atEdge: this.touchesEdge(b),
       firstT: t, t: t,
-      trail: [{ x: b.cx, y: b.cy, t: t }]
+      trail: [{ x: b.cx, y: b.cy, t: t, bx: b.x, by: b.y, bw: b.w, bh: b.h }]
     };
   };
 
@@ -296,10 +336,11 @@
     tr.cx = b.cx; tr.cy = b.cy;
     tr.bx = b.x; tr.by = b.y; tr.bw = b.w; tr.bh = b.h;
     tr.area = b.area;
+    tr.atEdge = this.touchesEdge(b);
     tr.hits++;
     tr.misses = 0;
     tr.t = t;
-    tr.trail.push({ x: b.cx, y: b.cy, t: t });
+    tr.trail.push({ x: b.cx, y: b.cy, t: t, bx: b.x, by: b.y, bw: b.w, bh: b.h });
     if (tr.trail.length > this.opts.trailLimit) tr.trail.shift();
   };
 

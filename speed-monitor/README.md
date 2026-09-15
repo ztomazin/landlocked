@@ -17,9 +17,46 @@ account, and no upload — the video never leaves your phone.
 1. Open `index.html` (or the deployed site) on your phone.
 2. **Choose a source** — the live camera, or a video you already recorded.
 3. **Draw two gates** by tapping two points for each line across the road.
-4. **Enter the ground distance** between the two lines, and the posted limit.
+4. **Set the scale.** Either mark something of known length and trace the road
+   direction (no tape measure — see below), or enter a distance you measured.
 5. **Start measuring.** Speeds appear as vehicles pass.
 6. **Export** the report (Markdown) and the per-vehicle data (CSV).
+
+## Setting the scale without a tape measure
+
+A camera cannot know how big anything is: the same picture fits a small object
+nearby or a large one far away. One real-world length has to come from
+somewhere — that is geometry, not a missing feature. What it does *not* have to
+be is the distance between the gates, and you never have to step into the road.
+
+Instead:
+
+1. **Mark something you know the length of**, lying along the road — a parked
+   car, a painted lane stripe, a sheet of plywood at the kerb. Anywhere in the
+   frame; it does not need to be near the gates.
+2. **Trace two lines that run along the road** and are parallel on the ground —
+   the far kerb and the centre line usually work best.
+
+That is enough to recover the geometry of the road surface and compute the gate
+distance itself. No lens data, no camera height, no tilt angle. Against a
+simulated camera the recovered distance is exact to within 0.2% across a wide
+range of heights, angles, lenses and viewing directions.
+
+The best reference of all is **your own car, measured once with a tape in your
+driveway** — safely off the road. After that it is a ruler you can park anywhere.
+
+Two things dominate the accuracy, both free to improve:
+
+- **Trace the road lines as far into the distance as you can see them.** A 6 m
+  trace gives ±40%; a 75 m trace gives ±3%. This is the single biggest factor.
+- **Use the longest reference you can.** A 12 m lane-stripe cycle beats a 4.7 m
+  car, which beats a 1.8 m bicycle.
+
+If you skip the road lines, the app falls back to inferring the road direction
+from the paths of passing vehicles, which needs no input at all but is
+noticeably rougher (about 15% systematic, and it says so on screen). Measuring
+can begin before the scale is set: crossings are timed either way, and the
+speeds fill in — and refine — once it is known.
 
 The live camera requires an `https` connection because browsers restrict camera
 access; a recorded video file works anywhere, including straight off the local
@@ -33,8 +70,9 @@ distance between them**.
 
 **Siting the camera**
 
-- Film roughly **perpendicular to the road**, not down the length of it. This is
-  what makes the geometry cancel out (see [docs/METHOD.md](docs/METHOD.md)).
+- Film roughly **perpendicular to the road**, not down the length of it.
+- **Higher is better.** A camera 3 m up looking down at 30° is about three times
+  more accurate than one at 1 m looking along the road at 6°.
 - **Keep the camera completely still** — prop it, brace it, or use a tripod. The
   gates are fixed to the video frame, so if the camera moves, the gates no
   longer line up with the road and every measurement after that is wrong.
@@ -75,11 +113,14 @@ Verified two ways:
 
 | Check | Result |
 | --- | --- |
-| Synthetic scene, exact ground truth (`npm test`) | worst error **0.24%** across 15–45 mph |
-| Rendered video through the real browser UI, end to end | three vehicles at 20/30/40 mph, all within **0.3%**, correct directions |
+| Synthetic scene, exact ground truth (`npm test`) | worst error **0.22%** across 15–45 mph |
+| Flat rendered video through the real browser UI | three vehicles at 20/30/40 mph, all within **0.3%** |
+| **Perspective** rendered video, browser UI, **nothing measured** | gate distance recovered as **8.000 m against 8.000 m true**; all 14 vehicles detected; every high-confidence speed within **8.9%**, most within 3% |
+| Projective geometry against a simulated camera | exact to **0.2%** across heights 1–2.4 m, tilts 5–26°, wide and telephoto lenses, yaw to 25° |
 
-Those figures are the software's own error with a perfect distance measurement.
-In the field, expect your distance measurement to dominate.
+Those figures are the software's own error. In the field, expect the scale —
+however you set it — to dominate, which is why every measurement is reported
+with an error bar and why the tool tells you which input to improve.
 
 ## Privacy and ethics
 
@@ -126,7 +167,15 @@ download, no network access, and it runs on an old phone:
 4. Blobs are linked frame to frame into tracks with velocity prediction.
 5. When a track crosses a gate, the exact crossing instant is interpolated
    *between* frames, so timing is finer than the frame rate.
-6. Speed = the measured ground distance ÷ the time between the two crossings.
+6. Speed = the ground distance ÷ the time between the two crossings.
+
+The tracked point is the **bottom of the blob**, where the tyres meet the road,
+not its centre. A point on the road surface crosses the drawn gate at exactly
+the moment it crosses the real line; a point above the road does not, and the
+error does not cancel between the gates. Tracking the middle of a vehicle
+instead inflates every speed by about 30% for a typical elevated camera — a
+mistake this project made, and which only a perspective test caught, because a
+flat test scene hides it completely.
 
 A detector-based mode (vehicle classification, better handling of overlapping
 traffic) is the obvious next step, but it would require a model download and
@@ -141,6 +190,7 @@ speed-monitor/
 ├── js/
 │   ├── tracker.js      background model, blob detection, tracking
 │   ├── speedmeter.js   gate geometry, speed, uncertainty
+│   ├── calibration.js  recovering the scale without measuring
 │   ├── analysis.js     statistics, CSV and report generation
 │   ├── selftest.js     synthetic scene with known ground truth
 │   └── app.js          UI wiring
@@ -181,7 +231,11 @@ Moving it to its own repository later needs no code changes: copy the folder, or
 Working and verified, but young. Worth doing next:
 
 - Field validation against a GPS-verified vehicle across several camera setups.
-- Detector-based tracking as an optional mode, for heavy or overlapping traffic.
+- Detector-based tracking as an optional mode: it would fix low-contrast
+  vehicles fragmenting, and would let the traffic-derived scale use a stable
+  vehicle landmark instead of a blob centroid.
+- A magnifier when placing points, to cut tap error — currently the limit on the
+  no-measuring path.
 - Vehicle counts by hour, for volume as well as speed.
 - Better handling of low light and long shadows.
 - A way to merge several sessions into one multi-day report.

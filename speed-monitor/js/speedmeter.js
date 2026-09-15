@@ -7,10 +7,21 @@
  * interpolated to sub-frame precision.
  *
  * Why this method: it needs no camera calibration, no lens parameters and no
- * perspective model. It also cancels most systematic error, because the same
- * reference point on the vehicle (the blob centroid) is used at both gates, so
- * a constant offset between that point and the true road-plane contact point
- * subtracts out of the time difference.
+ * perspective model.
+ *
+ * The one thing it does require is that the point being tracked lies on the
+ * ROAD PLANE. A gate drawn on the video is the image of a line painted across
+ * the tarmac, and a point on the tarmac crosses that image line exactly when it
+ * crosses the real line - whatever the camera's height, tilt or lens. A point
+ * ABOVE the road does not: seen from a raised camera it crosses the drawn line
+ * early or late, by a factor that does NOT cancel between the two gates. With a
+ * camera 3m up looking 20 degrees down, tracking the middle of a vehicle rather
+ * than its wheels inflates every speed by about 30%.
+ *
+ * So the tracked point is the bottom-centre of the blob - where the tyres meet
+ * the road - not its centroid. A useful consequence: because every point on the
+ * road plane is unbiased, a shadow stretching the blob sideways along the
+ * ground does not bias the timing either.
  *
  * Every measurement carries an uncertainty estimate. A speed number without an
  * error bar is not much use in front of a city council.
@@ -54,6 +65,19 @@
     var dx = to.x - from.x, dy = to.y - from.y;
     var len = Math.hypot(dx, dy) || 1;
     return { x: dx / len, y: dy / len };
+  }
+
+  /*
+   * The point on the vehicle used for gate crossings: bottom-centre of the
+   * bounding box, which approximates where it touches the road. Falls back to
+   * the centroid if no box is supplied.
+   */
+  function groundPoint(tr) {
+    if (tr.bx === undefined || tr.by === undefined ||
+        tr.bw === undefined || tr.bh === undefined) {
+      return { x: tr.cx, y: tr.cy };
+    }
+    return { x: tr.bx + tr.bw / 2, y: tr.by + tr.bh };
   }
 
   function SpeedMeter(config) {
@@ -130,7 +154,9 @@
    * that completed on this frame (usually none).
    */
   SpeedMeter.prototype.update = function (tracks, t) {
-    if (!this.cfg.gateA || !this.cfg.gateB || !(this.cfg.distanceMeters > 0)) return [];
+    // Gates are required; a known distance is not. Crossing times are recorded
+    // either way, and speeds are filled in once the scale arrives.
+    if (!this.cfg.gateA || !this.cfg.gateB) return [];
     if (this.lastT !== null && t > this.lastT) {
       this.intervals.push(t - this.lastT);
       if (this.intervals.length > 90) this.intervals.shift();
@@ -142,18 +168,28 @@
       var tr = tracks[i];
       var st = this.state[tr.id];
       var cur = {
-        p: { x: tr.cx, y: tr.cy },
+        p: groundPoint(tr),
         t: t,
         bw: tr.bw, bh: tr.bh, area: tr.area,
         misses: tr.missesTotal
       };
       if (!st) {
-        this.state[tr.id] = { prev: cur, A: null, B: null, invalid: false, done: false, frames: 0, lastSeen: t };
+        this.state[tr.id] = { prev: cur, A: null, B: null, invalid: false, frames: 0, lastSeen: t };
         continue;
       }
       st.lastSeen = t;
-      if (st.done || st.invalid) { st.prev = cur; continue; }
-      if (st.A || st.B) st.frames++;
+      if (st.invalid) { st.prev = cur; continue; }
+      if (st.A || st.B) {
+        st.frames++;
+        // A low-contrast vehicle can break into fragments part-way across,
+        // which moves the tracked point and skews the timing. Watch the blob's
+        // stability between the gates so such a pass can be flagged rather
+        // than quietly reported as fact.
+        st.minH = st.minH === undefined ? cur.bh : Math.min(st.minH, cur.bh);
+        st.maxH = st.maxH === undefined ? cur.bh : Math.max(st.maxH, cur.bh);
+        st.minArea = st.minArea === undefined ? cur.area : Math.min(st.minArea, cur.area);
+        st.maxArea = st.maxArea === undefined ? cur.area : Math.max(st.maxArea, cur.area);
+      }
 
       var hitA = crossing(this.cfg.gateA, st.prev, cur);
       var hitB = crossing(this.cfg.gateB, st.prev, cur);
@@ -169,8 +205,19 @@
 
       if (st.A && st.B && !st.invalid) {
         var m = this.measure(st, tr);
-        st.done = true;
         if (m) out.push(m); else this.rejected++;
+        /*
+         * Re-arm rather than retiring the track. Two vehicles passing at the
+         * edge of the frame can merge into a single blob, handing one track
+         * from the outgoing vehicle to the incoming one; a retired track would
+         * silently swallow that second vehicle. A vehicle that has genuinely
+         * finished its pass never crosses either gate again, so re-arming
+         * cannot double-count it.
+         */
+        st.A = null;
+        st.B = null;
+        st.frames = 0;
+        st.minH = st.maxH = st.minArea = st.maxArea = undefined;
       }
       st.prev = cur;
     }
@@ -193,22 +240,9 @@
     var dt = second.at.t - first.at.t;
     if (!(dt > 0)) return null;
 
-    var D = this.cfg.distanceMeters;
-    var speedMps = D / dt;
-    var mph = speedMps * MPS_TO_MPH;
-    if (mph < this.cfg.minMph || mph > this.cfg.maxMph) return null;
-
     var fi = this.frameInterval();
     var frames = dt / fi;
     if (frames < 2) return null; // too few samples to interpolate meaningfully
-
-    // Error model: distance measurement, crossing-time interpolation, and a
-    // residual geometry term. Combined in quadrature. See docs/METHOD.md.
-    var relD = this.distanceSigma() / D;
-    var sigmaT = 0.45 * fi; // two interpolated crossings, combined
-    var relT = sigmaT / dt;
-    var relG = this.cfg.geometrySigmaRel;
-    var rel = Math.sqrt(relD * relD + relT * relT + relG * relG);
 
     var flags = [];
     if (frames < 5) flags.push('few-frames');
@@ -220,29 +254,20 @@
     if (st.A.at.u < 0.06 || st.A.at.u > 0.94 || st.B.at.u < 0.06 || st.B.at.u > 0.94) {
       flags.push('gate-edge');
     }
+    if (st.maxH && st.minH > 0 && st.maxH / st.minH > 1.6) flags.push('unstable-blob');
+    else if (st.maxArea && st.minArea > 0 && st.maxArea / st.minArea > 2.4) flags.push('unstable-blob');
 
     var confidence = 'high';
     if (flags.length) confidence = 'medium';
-    if (frames < 4 || flags.length > 1) confidence = 'low';
+    if (frames < 4 || flags.length > 1 || flags.indexOf('unstable-blob') !== -1) confidence = 'low';
 
-    // Approximate object length: the bounding box extent along the direction of
-    // travel, scaled by the average metres-per-pixel. Perspective makes this a
-    // rough figure, useful for telling a pedestrian from a bus, nothing more.
-    var mpp = this.metersPerPixel();
-    var estLength = null, estClass = null;
-    if (mpp) {
-      var ax = Math.abs(this.axis.x), ay = Math.abs(this.axis.y);
-      var extentA = ax * st.A.sample.bw + ay * st.A.sample.bh;
-      var extentB = ax * st.B.sample.bw + ay * st.B.sample.bh;
-      estLength = (extentA + extentB) / 2 * mpp;
-      estClass = estLength < 1.3 ? 'pedestrian'
-               : estLength < 2.7 ? 'two-wheeler'
-               : estLength < 6.0 ? 'car'
-               : estLength < 9.0 ? 'light-truck'
-               : 'heavy-vehicle';
-    }
+    // Apparent size along the direction of travel, kept in pixels so that the
+    // length estimate can be recomputed if the scale changes later.
+    var ax = Math.abs(this.axis ? this.axis.x : 1), ay = Math.abs(this.axis ? this.axis.y : 0);
+    var extentPx = (ax * st.A.sample.bw + ay * st.A.sample.bh +
+                    ax * st.B.sample.bw + ay * st.B.sample.bh) / 2;
 
-    return {
+    var m = {
       seq: ++this.seq,
       trackId: tr.id,
       direction: first === st.A ? 'A>B' : 'B>A',
@@ -250,22 +275,85 @@
       wallClock: new Date().toISOString(),
       dt: dt,
       frames: frames,
-      speedMps: speedMps,
-      speedMph: mph,
-      speedKph: speedMps * MPS_TO_KPH,
-      sigmaRel: rel,
-      sigmaMph: mph * rel,
-      ci95Mph: 1.96 * mph * rel,
-      ci95Kph: 1.96 * speedMps * MPS_TO_KPH * rel,
-      estLengthM: estLength,
-      estClass: estClass,
+      frameInterval: fi,
+      extentPx: extentPx,
       confidence: confidence,
-      flags: flags
+      flags: flags,
+      pending: true,
+      speedMps: null, speedMph: null, speedKph: null,
+      sigmaRel: null, sigmaMph: null, ci95Mph: null, ci95Kph: null,
+      estLengthM: null, estClass: null
     };
+    return this.applyScale(m) === 'implausible' ? null : m;
+  };
+
+  /*
+   * Fill in (or refresh) the speed of a measurement from the current distance
+   * calibration. Timing is fixed at the moment of the crossing; the scale can
+   * arrive later or be refined, so this is kept separate and re-runnable.
+   *
+   * Returns 'ok', 'pending' (no scale yet) or 'implausible'.
+   */
+  SpeedMeter.prototype.applyScale = function (m) {
+    var D = this.cfg.distanceMeters;
+    if (!(D > 0)) {
+      m.pending = true;
+      m.speedMps = m.speedMph = m.speedKph = null;
+      m.sigmaRel = m.sigmaMph = m.ci95Mph = m.ci95Kph = null;
+      m.estLengthM = m.estClass = null;
+      return 'pending';
+    }
+    var speedMps = D / m.dt;
+    var mph = speedMps * MPS_TO_MPH;
+    if (mph < this.cfg.minMph || mph > this.cfg.maxMph) return 'implausible';
+
+    // Error model: distance, crossing-time interpolation, residual geometry.
+    // Combined in quadrature. See docs/METHOD.md.
+    var relD = this.distanceSigma() / D;
+    var relT = (0.45 * m.frameInterval) / m.dt;
+    var relG = this.cfg.geometrySigmaRel;
+    var rel = Math.sqrt(relD * relD + relT * relT + relG * relG);
+
+    m.pending = false;
+    m.speedMps = speedMps;
+    m.speedMph = mph;
+    m.speedKph = speedMps * MPS_TO_KPH;
+    m.sigmaRel = rel;
+    m.sigmaMph = mph * rel;
+    m.ci95Mph = 1.96 * mph * rel;
+    m.ci95Kph = 1.96 * m.speedKph * rel;
+
+    // Rough object length: perspective makes this approximate, enough to tell a
+    // pedestrian from a lorry and no more.
+    var mpp = this.metersPerPixel();
+    if (mpp) {
+      m.estLengthM = m.extentPx * mpp;
+      m.estClass = m.estLengthM < 1.3 ? 'pedestrian'
+                 : m.estLengthM < 2.7 ? 'two-wheeler'
+                 : m.estLengthM < 6.0 ? 'car'
+                 : m.estLengthM < 9.0 ? 'light-truck'
+                 : 'heavy-vehicle';
+    }
+    return 'ok';
+  };
+
+  /*
+   * Re-price a whole session after the calibration changes - which happens
+   * every time the traffic refines the scale. Returns the surviving
+   * measurements and how many became implausible.
+   */
+  SpeedMeter.prototype.rescaleAll = function (measurements) {
+    var kept = [], dropped = 0;
+    for (var i = 0; i < measurements.length; i++) {
+      if (this.applyScale(measurements[i]) === 'implausible') dropped++;
+      else kept.push(measurements[i]);
+    }
+    return { kept: kept, dropped: dropped };
   };
 
   root.SpeedMeter = SpeedMeter;
   root.SpeedGeometry = {
+    groundPoint: groundPoint,
     signedDistance: signedDistance,
     alongParam: alongParam,
     gateSeparation: gateSeparation,
